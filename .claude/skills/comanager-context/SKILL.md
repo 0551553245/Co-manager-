@@ -81,8 +81,12 @@ not through Claude Design for final implementation.
 ### users
 ```
 id, email, password_hash, role (super_admin | owner | branch_manager),
-name, name_ar, phone, avatar_url, is_active, created_at
+name, name_ar, restaurant_name, restaurant_name_ar, phone, avatar_url,
+is_active, created_at
 ```
+> `restaurant_name`/`restaurant_name_ar` (owner role only) added 2026-07-26
+> during Phase 1 auth build — the signup form collects a restaurant name
+> distinct from the owner's own name, and the schema had nowhere to put it.
 
 ### branches
 ```

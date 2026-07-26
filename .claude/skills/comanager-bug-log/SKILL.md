@@ -97,6 +97,23 @@ const supabaseTemp = createClient(url, key, {
 **Rule:** Any temporary Supabase client used for manager creation MUST use
 `persistSession: false` and a unique `storageKey`. (See comanager-auth.)
 
+**[Phase 1 update, 2026-07-26]** Co Manager's actual manager-creation flow
+(`app/owner/managers/actions.ts`) ended up server-side — a Server Action
+using `auth.admin.createUser()` with `email_confirm: true` via a
+service-role client, not a browser-side temp client calling `signUp()`.
+This was necessary because Supabase's "Confirm email" setting is global:
+owner registration needs it ON (comanager-logic §1's verification gate),
+but a manager created via public `signUp()` would then also need to click
+an email link before their first login, breaking "hand off password, log
+in immediately, no invite flow." `admin.createUser()` sidesteps this by
+setting the confirmation flag explicitly regardless of the project-wide
+setting. Since this path never creates a browser session at all, the
+specific risk this bug describes (a temp client's `signUp()` call
+overwriting the owner's session in storage) does not apply to it — mark
+this mitigation **[NOT APPLICABLE to server-side manager creation]**. The
+underlying rule still stands for any future browser-side temp-client usage
+elsewhere in the app.
+
 ---
 
 ## 🔴 CRITICAL — Data Isolation
@@ -386,6 +403,73 @@ Channel names:       always include a unique ID
 Callbacks:           never async
 Cleanup:             always supabase.removeChannel(channel) on unmount
 ```
+
+---
+
+### BUG #014 — Phone Collected at Signup, Never Persisted
+**Severity:** MEDIUM
+**Area/File:** `handle_new_user` trigger, comanager-schema.sql
+
+**WRONG:**
+```sql
+insert into public.users (id, email, role, name, branch_id)
+values (new.id, new.email, ..., ..., ...)
+-- phone is collected on the owner signup form but the trigger never
+-- writes it anywhere, so it's silently dropped on every signup.
+```
+
+**CORRECT:**
+```sql
+insert into public.users (id, email, role, name, restaurant_name, restaurant_name_ar, phone, branch_id)
+values (new.id, new.email, ..., ..., ..., ..., nullif(new.raw_user_meta_data->>'phone',''), ...)
+```
+
+**Rule:** Every field collected on a signup form must have a real column
+write path in `handle_new_user` — check the trigger's insert list against
+the actual form fields, not just against the schema's column list.
+
+---
+
+### BUG #015 — enforce_manager_cap's Exception Gets Swallowed by handle_new_user
+**Severity:** HIGH (identified, NOT fixed — deferred, see below)
+**Area/File:** `handle_new_user` + `enforce_manager_cap` triggers, comanager-schema.sql
+
+**Found during:** Phase 1 auth build, while wiring `/owner/managers`
+manager creation through `admin.createUser()`.
+
+**The problem:** `enforce_manager_cap` is a `BEFORE INSERT OR UPDATE`
+trigger on `public.users` that raises an exception when a branch would
+exceed 2 active managers — this is supposed to be the DB-level guarantee
+(comanager-logic §2: "the layer that actually matters"). But
+`handle_new_user`'s insert into `public.users` fires that same trigger as
+part of its own statement, and `handle_new_user` wraps its insert in
+`EXCEPTION WHEN OTHERS THEN RETURN new` (required so a crash never blocks
+signup — see BUG's own safe-trigger rule in comanager-auth). That blanket
+handler also swallows a legitimate `enforce_manager_cap` violation: the
+`auth.users` row already exists (created by the `admin.createUser()` /
+`signUp()` call, which already committed before this trigger runs), but
+the matching `public.users` row silently never gets created — producing
+exactly a "Profile not found" orphaned account (comanager-auth's own
+diagnosis section) instead of a clear, blocked creation.
+
+**Why not fixed now:** out of scope for Phase 1 per explicit instruction
+(DB trigger work excluded this phase). The app-level pre-check added in
+`app/owner/managers/actions.ts` (count active managers before calling
+`admin.createUser()`) prevents this from being hit in the normal
+(non-racing) case, so it's not blocking today's flow — but it's a real gap
+under concurrent requests or any direct-SQL/raw-insert path that bypasses
+the app layer.
+
+**Suggested fix (not applied):** either make `handle_new_user` re-raise
+specific business-rule exceptions (e.g. check `SQLSTATE` and only swallow
+genuinely unexpected errors), or have `enforce_manager_cap` run as an
+`AFTER` trigger with its own transaction-level guarantee that isn't nested
+inside `handle_new_user`'s exception scope.
+
+**Rule:** A `SECURITY DEFINER` trigger with a blanket exception handler can
+silently absorb a *different* trigger's legitimate business-rule violation
+if both fire on the same statement — audit trigger chains on the same
+table for this interaction, not just each trigger in isolation.
 
 ---
 

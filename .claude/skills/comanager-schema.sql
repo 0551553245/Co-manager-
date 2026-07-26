@@ -18,6 +18,8 @@ create table public.users (
   role text not null check (role in ('super_admin','owner','branch_manager')),
   name text not null,
   name_ar text,
+  restaurant_name text, -- owner role only; collected at /owner/register signup
+  restaurant_name_ar text,
   phone text,
   avatar_url text,
   branch_id uuid, -- set only for branch_manager role, FK added after branches table exists
@@ -202,17 +204,23 @@ language plpgsql
 security definer
 as $$
 begin
-  insert into public.users (id, email, role, name, branch_id)
+  insert into public.users (id, email, role, name, restaurant_name, restaurant_name_ar, phone, branch_id)
   values (
     new.id,
     new.email,
     coalesce(new.raw_user_meta_data->>'role', 'owner'),
     coalesce(new.raw_user_meta_data->>'name', ''),
+    nullif(new.raw_user_meta_data->>'restaurant_name',''),
+    nullif(new.raw_user_meta_data->>'restaurant_name_ar',''),
+    nullif(new.raw_user_meta_data->>'phone',''),
     nullif(new.raw_user_meta_data->>'branch_id','')::uuid
   )
   on conflict (id) do update set
     role = excluded.role,
     name = excluded.name,
+    restaurant_name = excluded.restaurant_name,
+    restaurant_name_ar = excluded.restaurant_name_ar,
+    phone = excluded.phone,
     branch_id = excluded.branch_id;
   return new;
 exception when others then
