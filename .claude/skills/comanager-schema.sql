@@ -76,7 +76,11 @@ create table public.task_submissions (
   note text,
   value_entered numeric,
   due_date date not null,
-  submitted_at timestamptz
+  submitted_at timestamptz,
+  -- Added 2026-07-27 for Phase 4 slot generation: the daily cron upserts
+  -- with ON CONFLICT DO NOTHING on this key so re-running it never
+  -- duplicates or resets an already-generated slot.
+  unique (task_id, branch_id, due_date)
 );
 
 create table public.food_safety_standards (
@@ -108,7 +112,13 @@ create table public.food_safety_submissions (
   standard_id uuid not null references public.food_safety_standards(id) on delete cascade,
   branch_id uuid not null references public.branches(id) on delete cascade,
   submitted_by uuid references public.users(id),
-  result text not null default 'pending' check (result in ('pending','pass','fail')),
+  -- 'missed' added 2026-07-27 for Phase 4: comanager-logic §4 says the
+  -- midnight job "flips any pending slot whose due date has fully passed
+  -- into status: 'missed'" for BOTH tables — this table's enum didn't
+  -- support it. Deliberately not reusing 'fail' for this: a missed check
+  -- (never done) and a failed reading (done, out of range) are different
+  -- events and the alert/acknowledge flow should be able to tell them apart.
+  result text not null default 'pending' check (result in ('pending','pass','fail','missed')),
   actual_value numeric,
   corrective_note text,
   photo_url text,
@@ -118,7 +128,8 @@ create table public.food_safety_submissions (
   acknowledged_by uuid references public.users(id),
   resolved_at timestamptz,
   resolved_by uuid references public.users(id),
-  resolve_note text
+  resolve_note text,
+  unique (standard_id, branch_id, due_date)
 );
 
 create table public.schedule_events (

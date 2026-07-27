@@ -19,6 +19,10 @@ coverage/
 # Vercel
 .vercel
 
+# Supabase CLI local artifacts (created by `supabase init`/`supabase link`)
+supabase/.temp
+supabase/.branches
+
 # Debug logs
 npm-debug.log*
 yarn-debug.log*

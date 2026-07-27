@@ -129,11 +129,16 @@ is_active (boolean, must be true on insert), created_at
 ### food_safety_submissions
 ```
 id, standard_id (→ food_safety_standards), submitted_by (→ users),
-branch_id (→ branches), result (pass | fail | pending),
-actual_value, corrective_note, photo_url, submitted_at
+branch_id (→ branches), result (pending | pass | fail | missed),
+actual_value, corrective_note, photo_url, due_date, submitted_at
 ```
 > Column is `result` (NOT status — that column does not exist).
 > Column is `actual_value` (not value), `corrective_note` (not note).
+> `missed` added 2026-07-27 during Phase 4 — comanager-logic §4 requires
+> the midnight job to flip overdue pending slots to "missed" for both
+> tasks and food safety; this enum didn't support it before. Deliberately
+> a distinct value from `fail`: missed = never checked, fail = checked and
+> out of range — different events for the alert/acknowledge flow.
 
 ### schedule_events
 ```
