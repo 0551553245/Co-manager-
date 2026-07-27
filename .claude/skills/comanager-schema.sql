@@ -91,6 +91,14 @@ create table public.food_safety_standards (
   check_frequency text not null check (check_frequency in ('daily','weekly','monthly')),
   temperature_min numeric,
   temperature_max numeric,
+  -- requires_value has no column here — a reading is always required for a
+  -- food-safety check (pass/fail is derived from it), unlike tasks where
+  -- checkbox-only is valid. photo/note are genuinely independent toggles
+  -- (comanager-logic §5: "a food safety check might require both a photo
+  -- AND a temperature value") — added 2026-07-27 during Phase 2, they were
+  -- missing even though comanager-logic already documented them.
+  requires_photo boolean not null default false,
+  requires_note boolean not null default false,
   is_active boolean not null default true,
   created_at timestamptz not null default now()
 );

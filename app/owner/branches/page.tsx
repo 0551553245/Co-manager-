@@ -1,0 +1,206 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import { supabaseOwner } from "@/lib/supabase/client";
+import { usePanelAuth } from "@/lib/auth/use-panel-auth";
+import { useRealtimeTable } from "@/lib/supabase/use-realtime";
+import {
+  calcPending,
+  calcRate,
+  completionBackgroundColor,
+  completionColor,
+  getExpectedForBranch,
+} from "@/lib/utils/completion";
+import { BranchModal, type BranchFormValues } from "./BranchModal";
+
+interface Branch {
+  id: string;
+  name: string;
+  name_ar: string | null;
+  address: string | null;
+  address_ar: string | null;
+  city: string | null;
+  phone: string | null;
+  is_active: boolean;
+}
+
+type ModalState = { type: "create" } | { type: "edit"; branch: Branch } | null;
+
+export default function BranchesPage() {
+  const { loading, profile, client } = usePanelAuth(supabaseOwner, "owner", "/owner/login");
+
+  const [branches, setBranches] = useState<Branch[]>([]);
+  const [managerCounts, setManagerCounts] = useState<Record<string, number>>({});
+  const [taskDefs, setTaskDefs] = useState<{ id: string; branch_id: string | null }[]>([]);
+  const [todaySubs, setTodaySubs] = useState<{ branch_id: string; status: string }[]>([]);
+  const [dataLoading, setDataLoading] = useState(true);
+  const [modal, setModal] = useState<ModalState>(null);
+
+  const loadData = useCallback(async () => {
+    setDataLoading(true);
+    const today = new Date().toISOString().slice(0, 10);
+    const [{ data: branchData }, { data: managerData }, { data: taskData }, { data: subData }] =
+      await Promise.all([
+        client
+          .from("branches")
+          .select("id, name, name_ar, address, address_ar, city, phone, is_active")
+          .order("name"),
+        client.from("users").select("branch_id").eq("role", "branch_manager").eq("is_active", true),
+        client.from("tasks").select("id, branch_id").eq("is_active", true),
+        client.from("task_submissions").select("branch_id, status").eq("due_date", today),
+      ]);
+
+    setBranches(branchData ?? []);
+    const counts: Record<string, number> = {};
+    (managerData ?? []).forEach((m) => {
+      if (m.branch_id) counts[m.branch_id] = (counts[m.branch_id] ?? 0) + 1;
+    });
+    setManagerCounts(counts);
+    setTaskDefs(taskData ?? []);
+    setTodaySubs(subData ?? []);
+    setDataLoading(false);
+  }, [client]);
+
+  useEffect(() => {
+    if (!loading && profile) loadData();
+  }, [loading, profile, loadData]);
+
+  // Live-refresh when a manager submits somewhere (comanager-logic §6) —
+  // dot-stats/completion badges here update without a manual refresh.
+  useRealtimeTable(client, `owner-branches-${profile?.id ?? "anon"}`, "task_submissions", loadData);
+
+  if (loading || !profile) {
+    return <main className="p-8 text-sm text-ink/60">Loading...</main>;
+  }
+
+  function branchStats(branchId: string) {
+    const expected = getExpectedForBranch(taskDefs, branchId);
+    const subs = todaySubs.filter((s) => s.branch_id === branchId);
+    const completed = subs.filter((s) => s.status === "completed").length;
+    const missed = subs.filter((s) => s.status === "missed").length;
+    return { completed, missed, pending: calcPending(expected, completed, missed), rate: calcRate(completed, expected) };
+  }
+
+  async function handleCreate(values: BranchFormValues): Promise<string | void> {
+    const { error } = await client.from("branches").insert({
+      owner_id: profile!.id,
+      name: values.name,
+      name_ar: values.name_ar || null,
+      address: values.address || null,
+      address_ar: values.address_ar || null,
+      city: values.city || null,
+      phone: values.phone || null,
+    });
+    if (error) return error.message;
+    setModal(null);
+    await loadData();
+  }
+
+  async function handleEdit(branchId: string, values: BranchFormValues): Promise<string | void> {
+    const { error } = await client
+      .from("branches")
+      .update({
+        name: values.name,
+        name_ar: values.name_ar || null,
+        address: values.address || null,
+        address_ar: values.address_ar || null,
+        city: values.city || null,
+        phone: values.phone || null,
+      })
+      .eq("id", branchId);
+    if (error) return error.message;
+    setModal(null);
+    await loadData();
+  }
+
+  async function toggleActive(branch: Branch) {
+    // Soft-delete only — branches.on-delete-cascade would wipe every
+    // historical task/food-safety submission for this branch, so a hard
+    // DELETE is never offered here, consistent with how managers are
+    // deactivated rather than deleted (comanager-logic §2).
+    await client.from("branches").update({ is_active: !branch.is_active }).eq("id", branch.id);
+    await loadData();
+  }
+
+  return (
+    <main className="p-8">
+      <div className="flex items-center justify-between">
+        <h1 className="font-display text-2xl">Branches</h1>
+        <button
+          onClick={() => setModal({ type: "create" })}
+          className="rounded bg-green px-4 py-2 text-sm text-cream"
+        >
+          + Add branch
+        </button>
+      </div>
+
+      {dataLoading ? (
+        <p className="mt-6 text-sm text-ink/60">Loading...</p>
+      ) : branches.length === 0 ? (
+        <p className="mt-6 text-sm text-ink/60">No branches yet.</p>
+      ) : (
+        <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {branches.map((b) => {
+            const stats = branchStats(b.id);
+            const color = completionColor(stats.rate);
+            const managers = managerCounts[b.id] ?? 0;
+            return (
+              <div key={b.id} className="rounded-lg bg-card p-4 shadow-sm">
+                <div className="flex items-start justify-between">
+                  <h3 className="font-display text-lg">{b.name}</h3>
+                  <span
+                    className="rounded-pill px-2 py-1 font-mono text-xs font-bold"
+                    style={{ backgroundColor: completionBackgroundColor(stats.rate), color }}
+                  >
+                    {stats.rate}%
+                  </span>
+                </div>
+                <p className="mt-1 text-sm text-ink/70">
+                  {[b.address, b.city].filter(Boolean).join(", ") || "No address set"}
+                </p>
+                <p className="mt-2 text-sm">Managers: {managers}/2</p>
+                <p className="mt-1 font-mono text-xs text-ink/60">
+                  {stats.completed}✓ · {stats.pending}• · {stats.missed}✗
+                </p>
+                {!b.is_active && (
+                  <span className="mt-2 inline-block rounded-pill bg-red/16 px-2 py-1 font-mono text-xs uppercase text-red-ink">
+                    Inactive
+                  </span>
+                )}
+                <div className="mt-3 flex gap-2">
+                  <button
+                    onClick={() => setModal({ type: "edit", branch: b })}
+                    className="rounded border px-3 py-1 text-xs"
+                  >
+                    Edit
+                  </button>
+                  <button onClick={() => toggleActive(b)} className="rounded border px-3 py-1 text-xs">
+                    {b.is_active ? "Deactivate" : "Reactivate"}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {modal?.type === "create" && (
+        <BranchModal
+          title="Add branch"
+          submitLabel="Create branch"
+          onCancel={() => setModal(null)}
+          onSubmit={handleCreate}
+        />
+      )}
+      {modal?.type === "edit" && (
+        <BranchModal
+          title="Edit branch"
+          submitLabel="Save changes"
+          initial={modal.branch}
+          onCancel={() => setModal(null)}
+          onSubmit={(values) => handleEdit(modal.branch.id, values)}
+        />
+      )}
+    </main>
+  );
+}

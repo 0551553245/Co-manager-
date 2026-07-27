@@ -200,18 +200,30 @@ never `status`. No exceptions. (See comanager-context schema.)
 ### BUG #006 — schedule_events Wrong Owner Column [SEEDED]
 **Severity:** HIGH
 
-**WRONG:**
+**[NOT APPLICABLE to Co Manager — corrected 2026-07-27 during Phase 2.]**
+Verified directly against the live DB: Co Manager's `schedule_events` DOES
+have an `owner_id` column (`comanager-schema.sql` already had it — this
+SEEDED entry was carried over from the old OpsPilot build, where the
+column genuinely didn't exist, without re-checking it against the new
+schema). `comanager-context`'s schema section was also wrong on this point
+and has been fixed. Use `owner_id` directly for owner-scoped queries —
+there's no need to join through `branches.owner_id` the way the old
+(wrong-for-here) example below suggests.
+
+**WRONG (for the OLD OpsPilot schema only, not Co Manager):**
 ```ts
 .eq('owner_id', ownerId) // ← column does not exist on schedule_events
 ```
 
-**CORRECT:**
+**CORRECT (for the OLD OpsPilot schema only, not Co Manager):**
 ```ts
 .eq('created_by', userId) // schedule_events has created_by, not owner_id
 ```
 
-**Rule:** `schedule_events` has `created_by`, never `owner_id`. To scope by
-owner, join through `branches.owner_id`.
+**Rule (Co Manager, current):** `schedule_events` has both `owner_id` and
+`created_by` — use `owner_id` to scope by owner, `created_by` to record
+who actually created the event (may differ if a future flow lets managers
+create events, though today only owners do).
 
 ---
 

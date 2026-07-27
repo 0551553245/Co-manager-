@@ -116,9 +116,15 @@ photo_url, note, value_entered, submitted_at, due_date
 ```
 id, branch_id (→ branches, NULLABLE for global standards), created_by (→ users),
 title, title_ar, description, description_ar, check_frequency,
-temperature_min, temperature_max, is_active (boolean, must be true on insert),
-created_at
+temperature_min, temperature_max, requires_photo, requires_note,
+is_active (boolean, must be true on insert), created_at
 ```
+> `requires_photo`/`requires_note` added 2026-07-27 during Phase 2 — was
+> missing even though comanager-logic §5 already documented these as
+> independent toggles for food-safety standards, same as tasks.
+> `requires_value` has no column here: a reading is always required for a
+> food-safety check (pass/fail is derived from it), so there's no
+> checkbox-only case the way there is for tasks.
 
 ### food_safety_submissions
 ```
@@ -131,10 +137,15 @@ actual_value, corrective_note, photo_url, submitted_at
 
 ### schedule_events
 ```
-id, branch_id (→ branches), created_by (→ users) — NOT owner_id, that column
-does not exist, title, title_ar, description, start_time, end_time,
-event_type, assigned_to (→ users), created_at
+id, owner_id (→ users), branch_id (→ branches, NULLABLE — null means all
+branches), created_by (→ users), title, title_ar, description, start_time,
+end_time, event_type, assigned_to (→ users), created_at
 ```
+> Corrected 2026-07-27 during Phase 2: this table DOES have `owner_id`
+> directly (verified against the live DB) — the prior claim here that it
+> didn't was copied from the old OpsPilot bug log (comanager-bug-log
+> BUG #006) without re-checking against Co Manager's actual schema.sql,
+> which already had it. See that bug log entry for the correction.
 
 ### notifications
 ```
@@ -144,10 +155,15 @@ type, is_read, related_id, created_at
 
 ### subscriptions
 ```
-id, owner_id (→ users), status (active | cancelled | expired),
-branches_count, price_per_branch_sar (default 50), billing_cycle_start,
-billing_cycle_end, moyasar_token, created_at
+id, owner_id (→ users), status (trialing | active | cancelled | expired),
+branches_count, price_per_branch_sar (default 50), trial_ends_at
+(default now()+14 days), billing_cycle_start, billing_cycle_end,
+moyasar_token, created_at
 ```
+> `trialing` and `trial_ends_at` were missing from this list even though
+> comanager-schema.sql and the live DB already had them (every fresh
+> signup's row is `status='trialing'`) — this doc was out of sync with
+> its own source of truth; fixed 2026-07-27 during Phase 2 pre-check.
 > Pricing model: **50 SAR per branch per month**, includes up to 2 branch
 > managers per branch. Not a fixed tier (basic/pro/enterprise) — that model
 > is retired. Trial: 14 days, read-only lockout for the owner if no card is
@@ -229,11 +245,20 @@ comanager-design skill gets built from them.)*
   it's unreadable at that range.
 
 ## Open UX Questions (unresolved — decide before building these screens)
-- **Task editing flow**: creation exists ("three fields, one button") but
-  editing an existing task's name/frequency/items was never designed.
-- **Food safety fail-state (owner side)**: when a manager submits a failed
-  reading, does it need distinct flagging in the log, a link to which
-  manager/branch, and an acknowledge/resolve action for the owner? Not yet answered.
+- ~~Task editing flow~~ — **resolved**, was just stale here: comanager-logic
+  §7 already specifies editing reuses the same low-friction modal,
+  pre-filled, and edits apply going forward only (never rewrite submission
+  history). Fixed 2026-07-27 during Phase 2 pre-check.
+- **Food safety fail-state (owner side) — partially resolved.**
+  comanager-design-match's Food Safety screen specifies an alert banner
+  ("N unresolved food-safety failures", branch/standard/submitter/time for
+  the most recent, a "View all" link, an Acknowledge button) —
+  `food_safety_submissions.acknowledged_at`/`acknowledged_by` implement
+  exactly this ("unresolved" = `result='fail' AND acknowledged_at IS NULL`).
+  Still genuinely open: the schema also has `resolved_at`/`resolved_by`/
+  `resolve_note` columns with no locked UI spec for a separate "resolve
+  with a corrective note" flow beyond acknowledging — built Acknowledge
+  only in Phase 2; Resolve is schema-ready but not yet designed.
 
 ## Current Project State
 
