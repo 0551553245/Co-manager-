@@ -526,6 +526,64 @@ submission time, not filled in later.
 
 ---
 
+### BUG #017 — Email Confirmation Tokens Arrive as a URL Hash Fragment, Not a Query Param
+**Severity:** CRITICAL
+**Area/File:** `app/auth/confirm/` (was `route.ts`, now `page.tsx`), `app/owner/register/actions.ts`
+
+**Found during:** adding `emailRedirectTo` to the owner `signUp()` call so
+the default "Confirm signup" email template would work without needing a
+manual template edit. Verified by generating a real signup link via the
+admin API and following its actual redirect chain (`fetch(..., {redirect:
+"manual"})` and reading the `Location` header) instead of assuming.
+
+**The problem:** it's tempting to assume that because
+`lib/supabase/client.ts`/`server.ts` set `flowType: "pkce"`, the
+confirmation redirect would carry a `?code=` query param, handleable in a
+server-side Route Handler via `exchangeCodeForSession(code)`. It doesn't.
+Supabase's hosted `/auth/v1/verify` endpoint (what `{{ .ConfirmationURL }}`
+points to) redirects with the session directly in a **URL hash
+fragment** — `#access_token=...&refresh_token=...&type=signup` —
+regardless of the client's configured `flowType`. Hash fragments are
+never sent to the server by the browser at all (they're stripped before
+the request leaves the client), so **no server-side Route Handler can
+ever see this format, no matter how it's written.**
+
+**WRONG:**
+```ts
+// app/auth/confirm/route.ts (a server Route Handler)
+export async function GET(request: NextRequest) {
+  const { searchParams } = new URL(request.url);
+  const code = searchParams.get("code"); // always null for this link format
+  const token_hash = searchParams.get("token_hash"); // also null
+  // ...never reaches the tokens that actually arrived in the #fragment
+}
+```
+
+**CORRECT:**
+```tsx
+// app/auth/confirm/page.tsx — a Client Component, so window.location.hash
+// is actually readable.
+"use client";
+useEffect(() => {
+  const hashParams = new URLSearchParams(window.location.hash.slice(1));
+  const accessToken = hashParams.get("access_token");
+  const refreshToken = hashParams.get("refresh_token");
+  if (accessToken && refreshToken) {
+    client.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+  }
+}, []);
+```
+
+**Rule:** Any page handling a Supabase email-link redirect (confirmation,
+magic link, recovery) must be a Client Component if it needs to read
+`access_token`/`refresh_token` — check the *actual* redirect (via a real
+generated link + `fetch(url, {redirect:"manual"})` and reading `Location`)
+before assuming query-param vs. hash-fragment format. Never assume based
+on `flowType` alone; the hosted email-verify endpoint behaves differently
+from OAuth/PKCE redirects.
+
+---
+
 ## ➕ HOW TO ADD A NEW BUG
 
 When you fix a new bug, add it at the bottom of the relevant severity

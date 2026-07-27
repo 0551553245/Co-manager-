@@ -20,20 +20,20 @@ anything gets reset:
    **enabled**. This is what makes the owner email-verification gate
    (comanager-logic §1) actually block first login until confirmed.
 
-2. **Authentication → Email Templates → "Confirm signup"** must link to
-   this app's own confirmation route instead of the default Supabase-hosted
-   confirmation URL:
-
-   ```
-   {{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=signup
-   ```
-
-   Without this, clicking the confirmation link in a real signup email
-   will NOT land on `/auth/confirm` and the owner's session will never get
-   established through this app's code. (Note: Phase 1 verification
-   tested the `/auth/confirm` route itself by generating a token directly
-   via the admin API, bypassing the real email — so this template change
-   specifically has **not** been confirmed as applied. Check it.)
+2. **Authentication → Email Templates → "Confirm signup" — no longer
+   required, but optional.** Earlier guidance here said this template
+   *must* be edited to link to
+   `{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=signup`.
+   That's no longer true: `registerOwner` now passes `emailRedirectTo`, and
+   `app/auth/confirm/page.tsx` was rewritten (as a Client Component, not a
+   server route — see comanager-bug-log BUG #017) to handle whatever the
+   **default**, unedited template sends: a URL hash fragment
+   (`#access_token=...&refresh_token=...`). Verified end-to-end by
+   following the actual redirect chain of a real generated link and
+   confirming it lands on the owner dashboard. You can leave this template
+   at its default. If you *do* still want to customize it to the
+   `token_hash`/`type` query-string format instead, that also still works —
+   the page handles both, plus a `code` param, in one place.
 
 ---
 

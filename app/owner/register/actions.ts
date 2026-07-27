@@ -1,5 +1,6 @@
 "use server";
 
+import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { supabaseOwnerServer } from "@/lib/supabase/server";
 import { createServiceRoleClient } from "@/lib/supabase/service-role";
@@ -45,11 +46,23 @@ export async function registerOwner(
     return { error: "Passwords do not match." };
   }
 
+  // With emailRedirectTo set, Supabase's default "Confirm signup" template
+  // (still using {{ .ConfirmationURL }}, unedited) redirects here with the
+  // session in a URL hash fragment (#access_token=...&refresh_token=...) —
+  // confirmed by following the actual redirect chain. That's why
+  // app/auth/confirm is a Client Component page, not a server route:
+  // fragments never reach the server at all.
+  const headersList = headers();
+  const origin =
+    headersList.get("origin") ??
+    `${headersList.get("x-forwarded-proto") ?? "http"}://${headersList.get("host")}`;
+
   const supabase = supabaseOwnerServer();
   const { data, error } = await supabase.auth.signUp({
     email,
     password,
     options: {
+      emailRedirectTo: `${origin}/auth/confirm`,
       data: {
         role: "owner",
         name: ownerName,
