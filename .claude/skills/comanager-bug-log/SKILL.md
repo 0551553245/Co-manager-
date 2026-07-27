@@ -485,6 +485,47 @@ table for this interaction, not just each trigger in isolation.
 
 ---
 
+### BUG #016 — submitted_by Never Set on Task/Food-Safety Submission
+**Severity:** HIGH
+**Area/File:** `app/branch-manager/tasks/page.tsx`, `app/branch-manager/food-safety/page.tsx`
+
+**Found during:** Phase 3 end-to-end testing — the Owner Dashboard's
+Recent Activity feed showed "Someone completed 'Closing Checklist'"
+instead of the manager's actual name.
+
+**WRONG:**
+```ts
+await client.from("task_submissions").update({
+  status: "completed",
+  submitted_at: new Date().toISOString(),
+  note: ...,
+  value_entered: ...,
+}).eq("id", submission.id);
+// submitted_by is never set — stays whatever it was on the pre-created
+// pending row (null), so nothing downstream can attribute the submission
+// to a manager.
+```
+
+**CORRECT:**
+```ts
+await client.from("task_submissions").update({
+  status: "completed",
+  submitted_by: profile.id, // the authenticated manager's own id
+  submitted_at: new Date().toISOString(),
+  note: ...,
+  value_entered: ...,
+}).eq("id", submission.id);
+```
+
+**Rule:** Any submission-completing UPDATE (`task_submissions`,
+`food_safety_submissions`) must set `submitted_by` to the authenticated
+manager's own profile id — every downstream feature that attributes work
+to a person (Recent Activity, food-safety fail alerts showing who
+submitted, future manager performance views) depends on this being set at
+submission time, not filled in later.
+
+---
+
 ## ➕ HOW TO ADD A NEW BUG
 
 When you fix a new bug, add it at the bottom of the relevant severity
