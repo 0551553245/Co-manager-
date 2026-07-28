@@ -1,5 +1,7 @@
 import "server-only";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+
+export type ServiceRoleClient = SupabaseClient;
 
 // Full admin access — bypasses Postgres RLS entirely via the service_role
 // key. This is NOT the same thing as `supabaseAdmin` in client.ts/server.ts

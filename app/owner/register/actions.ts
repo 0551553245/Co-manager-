@@ -3,10 +3,35 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { supabaseOwnerServer } from "@/lib/supabase/server";
-import { createServiceRoleClient } from "@/lib/supabase/service-role";
+import { createServiceRoleClient, type ServiceRoleClient } from "@/lib/supabase/service-role";
 
 export interface RegisterState {
   error?: string;
+}
+
+// handle_new_user (comanager-schema.sql) creates the matching public.users
+// row inside the same trigger chain as the auth.users insert, so by the
+// time signUp() resolves it should already be visible — but a live
+// registration hit a subscriptions_owner_id_fkey violation immediately
+// after a successful signUp(), meaning that row wasn't visible yet to this
+// query. Root cause unconfirmed (a clean-room reproduction succeeded, no
+// orphaned auth.users rows were found) — this polls defensively rather
+// than assuming it was a one-off, since handle_new_user's blanket
+// exception handler (comanager-bug-log BUG #015) could also silently
+// swallow a real failure here, not just the manager-cap case it was
+// originally flagged for. See BUG #018.
+async function waitForUserProfile(
+  admin: ServiceRoleClient,
+  userId: string,
+  attempts = 5,
+  delayMs = 200,
+): Promise<boolean> {
+  for (let i = 0; i < attempts; i++) {
+    const { data } = await admin.from("users").select("id").eq("id", userId).maybeSingle();
+    if (data) return true;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return false;
 }
 
 // comanager-logic §1: restaurant name, owner name, email, phone, branch
@@ -84,6 +109,16 @@ export async function registerOwner(
   // session exists yet pre-confirmation anyway), so this runs privileged,
   // server-side, right after signup completes.
   const admin = createServiceRoleClient();
+
+  const profileReady = await waitForUserProfile(admin, data.user.id);
+  if (!profileReady) {
+    console.error(
+      `handle_new_user never created a public.users row for ${data.user.id} after 5 retries — likely a silently swallowed trigger exception, see BUG #018.`,
+    );
+    await admin.auth.admin.deleteUser(data.user.id);
+    return { error: "Something went wrong creating your account. Please try again." };
+  }
+
   const { error: subscriptionError } = await admin.from("subscriptions").insert({
     owner_id: data.user.id,
     status: "trialing",

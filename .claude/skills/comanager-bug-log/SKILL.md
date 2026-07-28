@@ -584,6 +584,68 @@ from OAuth/PKCE redirects.
 
 ---
 
+### BUG #018 — subscriptions Insert Hit owner_id FK Violation Right After signUp()
+**Severity:** HIGH
+**Area/File:** `app/owner/register/actions.ts`
+
+**Found during:** live registration testing — the founder hit "Something
+went wrong setting up your trial." Server logs showed the real error:
+
+```
+insert or update on table "subscriptions" violates foreign key constraint "subscriptions_owner_id_fkey"
+Key (owner_id)=(...) is not present in table "users"
+```
+
+**Investigation:** `handle_new_user` creates the matching `public.users`
+row inside the same trigger chain as the `auth.users` insert, so by the
+time `signUp()` resolves it should already be visible to any subsequent
+query. A clean-room reproduction (calling `signUp()` directly, then
+immediately querying `public.users` for the new id) succeeded without
+issue, and no orphaned `auth.users` rows (with no matching `public.users`
+row) were found anywhere in the project. **Root cause not conclusively
+identified** — this was either a genuine one-off timing/visibility gap
+between the trigger's commit and the next query seeing it, or a rare
+silent failure inside `handle_new_user`'s blanket
+`EXCEPTION WHEN OTHERS THEN RETURN new` handler (the same swallowing
+mechanism already flagged in BUG #015, there scoped only to the
+manager-cap trigger interaction — this incident suggests the risk is
+broader: ANY unexpected error during that insert gets silently absorbed
+for ANY signup, not just manager creation).
+
+**WRONG:**
+```ts
+const { data } = await supabase.auth.signUp({ email, password, options: { data: {...} } });
+// assumes the public.users row handle_new_user creates is already
+// visible the instant signUp() resolves — inserts into subscriptions
+// immediately, with no defense against it not being there yet.
+await admin.from("subscriptions").insert({ owner_id: data.user.id, ... });
+```
+
+**CORRECT:**
+```ts
+const { data } = await supabase.auth.signUp({ email, password, options: { data: {...} } });
+
+// Poll briefly before trusting the row exists — cheap insurance against
+// a timing gap, and correctly distinguishes "not visible yet" from "the
+// trigger silently failed" (the latter needs a clearer error + rollback,
+// not a blind retry of the subscriptions insert).
+const profileReady = await waitForUserProfile(admin, data.user.id); // 5 attempts, 200ms apart
+if (!profileReady) {
+  await admin.auth.admin.deleteUser(data.user.id);
+  return { error: "Something went wrong creating your account. Please try again." };
+}
+await admin.from("subscriptions").insert({ owner_id: data.user.id, ... });
+```
+
+**Rule:** Never assume a value written by a database trigger fired as a
+side effect of an Auth API call (`signUp`, `admin.createUser`) is
+immediately visible to a *separate* subsequent query, even though in
+principle the trigger runs inside the same committed transaction. Poll
+briefly before depending on it, and treat "still not there after
+retrying" as a distinct, more serious failure mode than "not there yet."
+
+---
+
 ## ➕ HOW TO ADD A NEW BUG
 
 When you fix a new bug, add it at the bottom of the relevant severity
