@@ -4,7 +4,6 @@ import { useCallback, useEffect, useState } from "react";
 import { supabaseBranchManager } from "@/lib/supabase/client";
 import { usePanelAuth } from "@/lib/auth/use-panel-auth";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
-import { LogoutButton } from "@/components/auth/LogoutButton";
 import { calcRate, completionColor } from "@/lib/utils/completion";
 
 interface TaskDef {
@@ -104,10 +103,7 @@ export default function BranchManagerDashboardPage() {
 
   return (
     <main className="p-8">
-      <div className="flex items-center justify-between">
-        <h1 className="font-display text-2xl">Good shift, {profile.name}</h1>
-        <LogoutButton client={client} loginPath="/branch-manager/login" />
-      </div>
+      <h1 className="font-display text-2xl">Good shift, {profile.name}</h1>
 
       {dataLoading ? (
         <p className="mt-6 text-sm text-ink/60">Loading...</p>
