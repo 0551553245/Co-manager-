@@ -39,6 +39,18 @@ async function waitForUserProfile(
 // signup, independent of email confirmation (which only gates *reaching
 // the dashboard*, not the trial clock — see comanager-logic §1).
 //
+// TEMPORARY, founder-directed change (2026-07-28): the email-verification
+// gate is disabled for now — see PENDING_MANUAL_STEPS.md, "Confirm email"
+// must be turned OFF in the Supabase dashboard for this to fully take
+// effect (that toggle is the actual mechanism; nothing in this file can
+// override it, since Supabase's own signUp()/signInWithPassword() enforce
+// it server-side regardless of what this code does). This function still
+// handles BOTH cases without needing another code change later: if
+// signUp() returns a session (confirmation off), log in immediately; if
+// it returns null (confirmation on), fall back to the check-email screen.
+// Re-enabling comanager-logic §1's gate later just means turning the
+// Supabase toggle back on — no code change needed either way.
+//
 // Password + confirmPassword aren't listed in comanager-logic's field list
 // (an apparent oversight there — comanager-auth's login flow requires
 // signInWithPassword, which needs a password to exist). Added here as the
@@ -132,6 +144,14 @@ export async function registerOwner(
     // account — roll back rather than leave it half-created.
     await admin.auth.admin.deleteUser(data.user.id);
     return { error: "Something went wrong setting up your trial. Please try again." };
+  }
+
+  // signUp() only returns a session directly when Supabase's "Confirm
+  // email" setting is off — supabaseOwnerServer's cookie adapter already
+  // persisted it via signUp() itself, so this is already a logged-in
+  // session, no separate login step needed.
+  if (data.session) {
+    redirect("/owner/dashboard");
   }
 
   redirect("/owner/register/check-email");

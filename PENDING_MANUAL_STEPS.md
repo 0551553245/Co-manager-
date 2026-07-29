@@ -12,13 +12,16 @@ Run the SQL sections in order — later ones depend on earlier ones existing.
 
 ## 1. Supabase Auth dashboard settings
 
-These should already be done (Phase 1 registration/login was verified
-working against them), but are listed here for completeness/in case
-anything gets reset:
-
-1. **Authentication → Providers → Email → "Confirm email"** must be
-   **enabled**. This is what makes the owner email-verification gate
-   (comanager-logic §1) actually block first login until confirmed.
+1. **Authentication → Providers → Email → "Confirm email"** — **turn this
+   OFF for now.** Founder-directed change, 2026-07-28: the email
+   verification gate (comanager-logic §1) is temporarily disabled so
+   owners land in the dashboard immediately after signing up, no
+   confirmation step. This is the actual mechanism — nothing in the app
+   code can override this setting either way, since Supabase's own
+   `signUp()`/`signInWithPassword()` enforce it server-side. The code
+   already adapts to whichever way this is set (see
+   `app/owner/register/actions.ts`), so flipping it back ON later to
+   re-enable comanager-logic §1's gate needs no code change.
 
 2. **Authentication → Email Templates → "Confirm signup" — no longer
    required, but optional.** Earlier guidance here said this template

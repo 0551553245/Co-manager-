@@ -31,6 +31,14 @@ note that each branch includes up to 2 branch managers.
   registration / reach the dashboard for the first time until they verify.
 - After that first verification, **normal login never re-checks
   verification status.** Do not add a "please verify" gate to the login flow.
+- **[TEMPORARILY DISABLED, 2026-07-28 — founder-directed, not a locked-rule
+  change.]** This gate is currently OFF (Supabase's "Confirm email" setting
+  turned off — see PENDING_MANUAL_STEPS.md) so owners land in the dashboard
+  immediately after signup. `app/owner/register/actions.ts` already adapts
+  to whichever way that setting is: re-enabling it is a Supabase dashboard
+  toggle, not a code change. Don't "fix" the code to re-add gating logic —
+  there isn't any to add; the gate lives entirely in that one Supabase
+  setting.
 
 **Phone number** is collected as contact info — no verification requirement
 stated, treat as a plain field unless told otherwise.
