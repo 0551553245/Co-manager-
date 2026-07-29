@@ -825,6 +825,122 @@ authenticated browser client keeps real JWT verification on.
 
 ---
 
+### BUG #022 — Duplicate sort_order When Editing a Task With Mixed Existing/New Items
+**Severity:** MEDIUM
+**Area/File:** `app/owner/(authenticated)/tasks/page.tsx` — `handleEdit`, `insertItems`
+
+**Found during:** full regression pass (2026-07-29) — edited an existing
+3-item task, removed one item and added a new one in the same save, then
+checked `task_items.sort_order` directly in the DB. Two rows had
+`sort_order = 0`.
+
+**The problem:** `handleEdit` reconciles items in two separate groups —
+existing items (have an `id`, go through an `update`) and new items (no
+`id`, go through `insertItems`) — and computed each group's `sort_order`
+from that group's OWN index via `.map((it, index) => ...)`, not from the
+item's actual position in the full `values.items` array as arranged in
+the form. Both groups independently start counting from 0, so whenever
+both existing and new items are present after an edit, their `sort_order`
+values collide instead of reflecting the real combined order. Doesn't
+break `handleCreate` (there, every item is "new" so the whole array's
+index already is the combined order) — only shows up on edit.
+
+**WRONG:**
+```ts
+const updates = values.items
+  .filter((it) => !!it.id)
+  .map((it, index) => // index within the existing-only subset
+    client.from("task_items").update({ sort_order: index, ... }).eq("id", it.id));
+
+const newItems = values.items.filter((it) => !it.id);
+insertItems(taskId, newItems); // insertItems assigns sort_order from
+                                // ITS OWN array's index too — 0-based again
+```
+
+**CORRECT:**
+```ts
+// Compute index from the ONE combined array first, then split
+const itemsWithIndex = values.items.map((item, sortOrder) => ({ item, sortOrder }));
+
+const updates = itemsWithIndex
+  .filter((x) => !!x.item.id)
+  .map(({ item: it, sortOrder }) =>
+    client.from("task_items").update({ sort_order: sortOrder, ... }).eq("id", it.id));
+
+const newEntries = itemsWithIndex.filter(({ item }) => !item.id);
+insertItems(taskId, newEntries); // insertItems now takes { item, sortOrder }
+                                  // pairs and uses the passed sortOrder directly
+```
+
+**Rule:** When splitting one ordered array into subsets for different
+DB operations (update vs. insert, active vs. removed, etc.), compute any
+value that depends on position (`sort_order`, rank, index) from the
+ORIGINAL combined array before splitting — never re-derive it from a
+subset's own enumeration, since each subset restarts at 0 independently
+and positions collide the moment more than one subset is non-empty.
+
+---
+
+### BUG #023 — Realtime Never Fires: Tables Never Added to supabase_realtime Publication
+**Severity:** CRITICAL
+**Area/File:** Supabase project config (not app code) — affects every page using `useRealtimeTable`
+
+**Found during:** full regression pass (2026-07-29) — had the owner
+Dashboard open in one tab, submitted a food-safety reading as a branch
+manager in another tab, and the Dashboard's stat cards / Recent Activity
+never updated without a manual refresh. Verified the write itself
+succeeded (`result: "pass"`, `submitted_by` set correctly in the DB) —
+this ruled out "the submission failed" immediately. Root-caused with a
+standalone Node script using `@supabase/supabase-js` directly (no
+React/browser involved at all): subscribed to `postgres_changes` on
+`food_safety_submissions`, got `SUBSCRIBED`, triggered a real `UPDATE` via
+the service-role client, and received **zero events** after 8 seconds.
+Repeated the identical test against `task_submissions` — same result.
+
+**The problem:** `lib/supabase/use-realtime.ts` (the shared hook every
+page uses) is correct — `event: "*"`, unique channel name per caller,
+proper cleanup, synchronous callback wrapper (matches BUG#009/010/011's
+rules exactly). The gap is entirely at the Supabase project level:
+Postgres's logical-replication publication that Realtime reads from
+(`supabase_realtime`) never had these tables added to it. This is a
+one-time setup step (SQL `ALTER PUBLICATION ... ADD TABLE` or the
+Dashboard's Database → Replication toggle) — it does **not** happen
+automatically just because a table has RLS enabled, and nothing in this
+project's history (schema file, PENDING_MANUAL_STEPS.md) ever asked for
+it to be done. The entire "live updates without refresh" feature — the
+whole point of the "LIVE" badge on the owner Dashboard — has likely never
+actually worked for any table.
+
+**WRONG (diagnosis to avoid):**
+Assuming this is an app bug and rewriting `useRealtimeTable`, the
+channel-name logic, or the callback wiring — none of that is broken. A
+correct hook subscribed to a table that was never added to the
+publication will reliably report `SUBSCRIBED` and then just... never
+receive anything, with no error surfaced anywhere in the browser.
+
+**CORRECT (this is a database configuration fix, not a code fix):**
+```sql
+alter publication supabase_realtime add table
+  public.task_submissions,
+  public.task_item_submissions,
+  public.food_safety_submissions,
+  public.schedule_events;
+```
+
+**Rule:** Enabling RLS on a table does not make it deliver
+`postgres_changes` events — the table must ALSO be explicitly added to
+the `supabase_realtime` publication (a separate, one-time project setup
+step). When a `postgres_changes` subscription reports `SUBSCRIBED` but
+never delivers any event despite confirmed writes to that exact table,
+suspect the publication before suspecting the subscription code — verify
+directly with a standalone script outside the app (bypassing React/HMR
+entirely) before spending time debugging hook logic that is very likely
+already correct. **Manual SQL to apply this fix is in
+PENDING_MANUAL_STEPS.md §4 — not yet applied to the live DB as of this
+writing.**
+
+---
+
 ## ➕ HOW TO ADD A NEW BUG
 
 When you fix a new bug, add it at the bottom of the relevant severity

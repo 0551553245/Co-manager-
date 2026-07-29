@@ -452,7 +452,51 @@ select * from cron.job_run_details order by start_time desc limit 5;
 
 ---
 
-## 4. Not blocking today, but needed before real use
+## 4. CRITICAL: Enable Realtime replication for live-update tables (BUG#023, 2026-07-29)
+
+**Found during a full regression pass**: submitted a food-safety reading as
+a branch manager with the owner's Dashboard open in a separate tab (no
+manual refresh) — the "Pending" count and "Recent activity" feed never
+updated. Root-caused with a standalone Node script that subscribed
+directly to Supabase Realtime (bypassing the browser/React app entirely),
+triggered a real `UPDATE` via the service-role client, and confirmed
+**zero `postgres_changes` events were delivered** — reproduced for both
+`food_safety_submissions` and `task_submissions`. The app's own
+`useRealtimeTable` hook (`lib/supabase/use-realtime.ts`) is written
+correctly (`event: "*"`, unique channel names, cleanup on unmount — see
+comanager-bug-log BUG#009/010/011) — this is not an app-code bug. Tables
+are simply never delivered to Postgres's logical-replication publication
+that Supabase Realtime reads from, which is a one-time project setup step,
+not something that happens automatically just because RLS exists on the
+table.
+
+Run this in the Supabase SQL Editor — every table any page currently
+subscribes to via `useRealtimeTable`:
+
+```sql
+alter publication supabase_realtime add table
+  public.task_submissions,
+  public.task_item_submissions,
+  public.food_safety_submissions,
+  public.schedule_events;
+```
+
+(Equivalent Dashboard path: Database → Replication → click into the
+`supabase_realtime` publication → toggle these 4 tables on, if you prefer
+the UI over SQL.)
+
+**Not yet run.** After running it, re-test: open the owner Dashboard in
+one tab, submit a task or food-safety reading as a branch manager in
+another (or an incognito window), and confirm the stat cards / Recent
+Activity update within a second or two with no manual refresh. If it
+still doesn't update, check `select * from pg_publication_tables where
+pubname = 'supabase_realtime';` to confirm the 4 tables actually show up
+there — a report of ambiguous "0 rows returned" from that same query
+before running the `alter publication` above would confirm the diagnosis.
+
+---
+
+## 5. Not blocking today, but needed before real use
 
 - **Cloudinary credentials.** `requires_photo` is currently stubbed
   everywhere (Branch Manager Tasks and Food Safety submission forms) — the

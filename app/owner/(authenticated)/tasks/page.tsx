@@ -195,13 +195,23 @@ export default function TasksPage() {
     };
   }
 
-  async function insertItems(taskId: string, taskItems: TaskItemFormValues[]) {
-    if (taskItems.length === 0) return null;
-    const rows = taskItems.map((it, index) => ({
+  // sortOrder is passed explicitly per item rather than derived from the
+  // entries array's own index — callers must compute it from each item's
+  // position in the FULL (combined existing+new) items array, not its
+  // position within whatever subset happens to be passed here. Passing a
+  // plain array and using its own index was the bug (see BUG#022):
+  // existing items and new items were numbered from 0 independently,
+  // producing duplicate sort_order values whenever both existed together.
+  async function insertItems(
+    taskId: string,
+    entries: { item: TaskItemFormValues; sortOrder: number }[],
+  ) {
+    if (entries.length === 0) return null;
+    const rows = entries.map(({ item: it, sortOrder }) => ({
       task_id: taskId,
       title: it.title,
       title_ar: it.title_ar || null,
-      sort_order: index,
+      sort_order: sortOrder,
       requires_photo: it.requiresPhoto,
       requires_note: it.requiresNote,
       requires_value: it.requiresValue,
@@ -233,7 +243,10 @@ export default function TasksPage() {
       .single();
     if (error) return error.message;
 
-    const itemsError = await insertItems(data.id, values.items);
+    const itemsError = await insertItems(
+      data.id,
+      values.items.map((item, sortOrder) => ({ item, sortOrder })),
+    );
     if (itemsError) return itemsError.message;
 
     setModal(null);
@@ -262,20 +275,31 @@ export default function TasksPage() {
     // id), soft-delete ones the owner removed from the form (never hard
     // delete — cascade would wipe that item's task_item_submissions
     // history, same reasoning as branches/managers).
+    //
+    // sort_order for BOTH existing and new items must come from the
+    // item's index in this single combined array (the actual order shown
+    // in the form, including any drag-reorder) — computing it separately
+    // per subset (existing-only, new-only) was BUG#022: both subsets
+    // numbered from 0 independently, so adding a new item while existing
+    // ones remained produced duplicate sort_order values.
     const existingIds = new Set(values.items.filter((it) => it.id).map((it) => it.id));
     const removedIds = activeItemsForTask(taskId)
       .map((it) => it.id)
       .filter((id) => !existingIds.has(id));
 
-    const updates = values.items
-      .filter((it): it is TaskItemFormValues & { id: string } => !!it.id)
-      .map((it, index) =>
+    const itemsWithIndex = values.items.map((item, sortOrder) => ({ item, sortOrder }));
+
+    const updates = itemsWithIndex
+      .filter(
+        (x): x is { item: TaskItemFormValues & { id: string }; sortOrder: number } => !!x.item.id,
+      )
+      .map(({ item: it, sortOrder }) =>
         client
           .from("task_items")
           .update({
             title: it.title,
             title_ar: it.title_ar || null,
-            sort_order: index,
+            sort_order: sortOrder,
             requires_photo: it.requiresPhoto,
             requires_note: it.requiresNote,
             requires_value: it.requiresValue,
@@ -285,11 +309,11 @@ export default function TasksPage() {
           .eq("id", it.id),
       );
 
-    const newItems = values.items.filter((it) => !it.id);
+    const newEntries = itemsWithIndex.filter(({ item }) => !item.id);
 
     const [updateResults, insertError] = await Promise.all([
       Promise.all(updates),
-      insertItems(taskId, newItems),
+      insertItems(taskId, newEntries),
       removedIds.length > 0
         ? client.from("task_items").update({ is_active: false }).in("id", removedIds)
         : Promise.resolve({ error: null }),
