@@ -42,21 +42,19 @@ Run the SQL sections in order — later ones depend on earlier ones existing.
 
 ## 2. Schema migrations — run in the Supabase SQL Editor, in this order
 
-### 2.1 — Food safety standard requirement flags (from Phase 2)
+### 2.1 — Food safety standard requirement flags (from Phase 2) — ✅ DONE
 
 `food_safety_standards` was missing columns that `comanager-logic` §5
 already assumed existed (independent photo/note requirements, same as
-tasks):
+tasks). **Confirmed applied 2026-07-29** — verified live: the Food Safety
+page (both owner and branch-manager) loads without the column-missing
+error, and a real standard row with these columns renders correctly.
 
 ```sql
 alter table public.food_safety_standards
   add column if not exists requires_photo boolean not null default false,
   add column if not exists requires_note boolean not null default false;
 ```
-
-**Confirmed not yet run** — the live DB errors with `column
-food_safety_standards.requires_photo does not exist` as of the last check
-this session.
 
 ### 2.2 — Add 'missed' to food_safety_submissions.result (from Phase 4)
 
@@ -76,13 +74,15 @@ alter table public.food_safety_submissions
   check (result in ('pending', 'pass', 'fail', 'missed'));
 ```
 
-**Confirmed not yet run.** The exact constraint name
-(`food_safety_submissions_result_check`) was verified directly against
-the live DB this session (Postgres's default auto-generated name for an
-inline column check constraint) — if this errors with "constraint does
-not exist", the constraint was renamed or already dropped; check
-`\d food_safety_submissions` in `psql` or the Table Editor's constraints
-view before re-running.
+**Confirmed still not run (re-checked 2026-07-29 with a real insert, not
+just a query)** — inserting a test row with `result: 'missed'` was
+rejected with `violates check constraint
+"food_safety_submissions_result_check"`. The exact constraint name was
+verified directly against the live DB (Postgres's default auto-generated
+name for an inline column check constraint) — if this errors with
+"constraint does not exist", the constraint was renamed or already
+dropped; check `\d food_safety_submissions` in `psql` or the Table
+Editor's constraints view before re-running.
 
 ### 2.3 — Idempotency constraints for slot generation (from Phase 4)
 
@@ -101,10 +101,9 @@ alter table public.food_safety_submissions
   unique (standard_id, branch_id, due_date);
 ```
 
-**Confirmed not yet run** — attempting the Edge Function's upsert against
-the live DB this session failed with `there is no unique or exclusion
-constraint matching the ON CONFLICT specification`, confirming these
-don't exist yet.
+**Confirmed still not run (re-checked 2026-07-29)** — inserting two rows
+with the same `(task_id, branch_id, due_date)` was allowed (no rejection),
+confirming this constraint doesn't exist yet.
 
 > If either `ALTER TABLE ... ADD CONSTRAINT ... UNIQUE` fails with a
 > duplicate-key error, it means two rows already exist for the same
