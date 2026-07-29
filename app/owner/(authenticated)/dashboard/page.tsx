@@ -4,7 +4,6 @@ import { useCallback, useEffect, useState } from "react";
 import { supabaseOwner } from "@/lib/supabase/client";
 import { usePanelAuth } from "@/lib/auth/use-panel-auth";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
-import { LogoutButton } from "@/components/auth/LogoutButton";
 import { calcRate, completionColor } from "@/lib/utils/completion";
 
 interface Branch {
@@ -185,18 +184,13 @@ export default function OwnerDashboardPage() {
 
   return (
     <main className="p-8">
-      <div className="flex items-center justify-between">
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="font-display text-2xl">Dashboard</h1>
-            <span className="rounded-pill bg-red px-2 py-0.5 font-mono text-[10px] font-bold uppercase text-cream">
-              Live
-            </span>
-          </div>
-          <p className="text-sm text-ink/70">Live view across every branch</p>
-        </div>
-        <LogoutButton client={client} loginPath="/owner/login" />
+      <div className="flex items-center gap-2">
+        <h1 className="font-display text-2xl">Dashboard</h1>
+        <span className="rounded-pill bg-red px-2 py-0.5 font-mono text-[10px] font-bold uppercase text-cream">
+          Live
+        </span>
       </div>
+      <p className="text-sm text-ink/70">Live view across every branch</p>
 
       {dataLoading ? (
         <p className="mt-6 text-sm text-ink/60">Loading...</p>
