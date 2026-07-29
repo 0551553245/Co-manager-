@@ -2,12 +2,10 @@
 
 import { supabaseOwnerServer } from "@/lib/supabase/server";
 import { createServiceRoleClient } from "@/lib/supabase/service-role";
-import { generateTempPassword } from "@/lib/auth/generate-temp-password";
 
 export interface CreateManagerResult {
   error?: string;
   email?: string;
-  tempPassword?: string;
 }
 
 // comanager-auth direct-create flow, adapted to run server-side (see
@@ -20,9 +18,14 @@ export async function createManager(formData: FormData): Promise<CreateManagerRe
   const email = String(formData.get("email") ?? "")
     .trim()
     .toLowerCase();
+  const password = String(formData.get("password") ?? "");
   const branchId = String(formData.get("branchId") ?? "").trim();
 
-  if (!name || !email || !branchId) {
+  // Owner sets the manager's password directly now (founder decision,
+  // 2026-07-29 — see comanager-auth) — no auto-generated temp password,
+  // and deliberately no minimum length/complexity rule of our own on top
+  // of it.
+  if (!name || !email || !password || !branchId) {
     return { error: "Please fill in all fields." };
   }
 
@@ -59,18 +62,17 @@ export async function createManager(formData: FormData): Promise<CreateManagerRe
     return { error: "This branch already has 2 active managers." };
   }
 
-  const tempPassword = generateTempPassword();
   const admin = createServiceRoleClient();
 
   // admin.createUser with email_confirm:true — deliberately not a public
-  // signUp() call. Managers get handed a password directly and must be
-  // able to log in immediately (comanager-auth: no invite flow); a public
-  // signUp() would trigger Supabase's project-wide email-confirmation
+  // signUp() call. Managers must be able to log in immediately with the
+  // password their owner set for them (comanager-auth: no invite flow); a
+  // public signUp() would trigger Supabase's project-wide email-confirmation
   // requirement (needed for owner registration) and block the manager's
   // first login on a confirmation email they never see.
   const { data: created, error: createError } = await admin.auth.admin.createUser({
     email,
-    password: tempPassword,
+    password,
     email_confirm: true,
     user_metadata: {
       role: "branch_manager",
@@ -95,5 +97,5 @@ export async function createManager(formData: FormData): Promise<CreateManagerRe
     };
   }
 
-  return { email, tempPassword };
+  return { email };
 }

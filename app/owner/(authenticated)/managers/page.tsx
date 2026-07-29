@@ -24,9 +24,7 @@ export default function ManagersPage() {
   const [managers, setManagers] = useState<ManagerRow[]>([]);
   const [dataLoading, setDataLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
-  const [credentials, setCredentials] = useState<{ email: string; tempPassword: string } | null>(
-    null,
-  );
+  const [createdEmail, setCreatedEmail] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -74,9 +72,9 @@ export default function ManagersPage() {
       setFormError(result.error);
       return;
     }
-    if (result.email && result.tempPassword) {
+    if (result.email) {
       setModalOpen(false);
-      setCredentials({ email: result.email, tempPassword: result.tempPassword });
+      setCreatedEmail(result.email);
       await loadData();
     }
   }
@@ -159,6 +157,17 @@ export default function ManagersPage() {
                 Email
                 <input type="email" name="email" required className="rounded border p-2" />
               </label>
+              <label className="flex flex-col gap-1 text-sm">
+                Password
+                {/* Owner sets this directly now (founder decision,
+                    2026-07-29) — no auto-generated temp password, no
+                    minimum length/complexity rule of our own. Deliberately
+                    plain text, not masked: the owner has to relay this
+                    exact password to the manager afterward, and a masked
+                    typo here would bake in an unnoticed wrong password
+                    (see BUG#020 for exactly this failure mode). */}
+                <input type="text" name="password" required className="rounded border p-2" />
+              </label>
               <div className="mt-2 flex justify-end gap-2">
                 <button
                   type="button"
@@ -180,19 +189,15 @@ export default function ManagersPage() {
         </div>
       )}
 
-      {credentials && (
+      {createdEmail && (
         <div className="fixed inset-0 flex items-center justify-center bg-ink/40">
           <div className="w-full max-w-sm rounded-lg bg-card p-6">
             <h2 className="font-display text-lg">Manager created</h2>
             <p className="mt-2 text-sm text-ink/70">
-              Hand these credentials to the manager directly — shown only once.
+              {createdEmail} can now log in with the password you set.
             </p>
-            <div className="mt-4 rounded bg-cream p-3 font-mono text-sm">
-              <p>{credentials.email}</p>
-              <p>{credentials.tempPassword}</p>
-            </div>
             <button
-              onClick={() => setCredentials(null)}
+              onClick={() => setCreatedEmail(null)}
               className="mt-4 w-full rounded bg-green py-2 text-sm text-cream"
             >
               Done

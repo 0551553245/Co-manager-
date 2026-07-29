@@ -11,15 +11,30 @@ the schema or business rules — those live in comanager-context only.
 ## Account Creation
 
 **Branch Manager — created by the Owner, never self-registers, no invite codes**
-1. Owner generates a random 10-character temp password.
-2. Call `supabaseOwner.auth.signUp()` with the manager's email, temp
-   password, and metadata: `role: 'branch_manager'`, `name`, `branch_id`.
+1. Owner types the manager's email AND password directly into the Add
+   Manager form (founder decision, 2026-07-29 — replaces the earlier
+   auto-generated-temp-password flow). No minimum length/complexity rule
+   is enforced; the owner already knows the password they typed, so there's
+   no hand-off step afterward.
+2. Server-side action calls `admin.auth.admin.createUser()` (service-role
+   client, never a browser-side `signUp()`) with the manager's email, the
+   owner-provided password, `email_confirm: true`, and metadata:
+   `role: 'branch_manager'`, `name`, `branch_id`. Deliberately not
+   `supabaseOwner.auth.signUp()` — a public `signUp()` would inherit the
+   project's global "Confirm email" setting (which owner registration
+   needs ON), forcing the manager to click a confirmation email link
+   before their first login. `admin.createUser()` sets `email_confirm`
+   explicitly regardless of that project-wide setting, and never creates a
+   browser session in the owner's own tab, so there's no risk of it
+   overwriting the owner's session either.
 3. Immediately upsert into `public.users`: `id = authData.user.id`, `role`,
    `name`, `branch_id`, `is_active: true` — `onConflict: 'id'`,
    `ignoreDuplicates: false`. This step is not optional — skipping it is the
    #1 cause of "Profile not found" on first login.
 4. Update `branches.manager_id = authData.user.id`.
-5. Show the owner a modal with the manager's email + temp password to hand off.
+5. Show the owner a simple "Manager created" confirmation — no password
+   hand-off screen needed anymore, since the owner already knows what they
+   typed.
 
 **Owner** — self-registers at `/owner/register`, starts on a free trial.
 
