@@ -33,8 +33,13 @@ export function useLoginForm(
 
     const client = createClient();
     const { data, error: signInError } = await client.auth.signInWithPassword({
-      email,
-      password,
+      // GoTrue does an exact string match on both fields — a stray
+      // trailing space/newline (e.g. from selecting the password out of
+      // the "manager created" modal's stacked <p> tags, which browsers
+      // can include a trailing newline from on copy) silently produces
+      // this same generic "invalid credentials" error. See comanager-bug-log BUG#020.
+      email: email.trim(),
+      password: password.trim(),
     });
 
     if (signInError || !data.user) {

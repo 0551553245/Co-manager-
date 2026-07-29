@@ -713,6 +713,67 @@ writing.**
 
 ---
 
+### BUG #020 — Untrimmed Login Input Causes False "Invalid Email or Password"
+**Severity:** HIGH
+**Area/File:** `lib/auth/use-login-form.ts` (shared by all 3 panel login pages)
+
+**Found during:** investigating a founder report of a branch manager
+login failing with "Invalid email or password" using credentials that
+had just been created and shown in the `/owner/managers` "Manager
+created" modal. Verified the account itself was fine: `signInWithPassword`
+against the raw Auth API succeeded (200) with the exact stored
+credentials, `email_confirmed_at` was set, and the matching `public.users`
+row had `role='branch_manager'` and `is_active=true` — the account was
+never the problem. Isolated the actual cause empirically: hitting the
+Auth API directly with the same correct password plus one trailing space
+or newline reproduced the exact same generic failure
+(`400 Invalid login credentials`) that the app shows as "Invalid email or
+password." `createManager` (`app/owner/(authenticated)/managers/actions.ts`)
+already `.trim().toLowerCase()`s the email before creating the account, so
+the stored credentials are clean — the gap is entirely on the login side.
+
+**The problem:** the credentials-created modal
+(`app/owner/(authenticated)/managers/page.tsx`) displays the email and
+password in two separate stacked `<p>` tags — a well-known copy/paste
+footgun where selecting across block-level elements (e.g. via
+triple-click, or a drag-select that runs slightly long) can include a
+trailing newline in the clipboard. `use-login-form.ts` then passed
+whatever the input held straight into `signInWithPassword` with no
+trimming, so a single stray trailing space or newline picked up during
+copy-paste silently produces a generic "wrong credentials" error — even
+though the account, password, and role are all completely correct —
+and there's no way for the person logging in to tell the difference.
+
+**WRONG:**
+```ts
+const { data, error: signInError } = await client.auth.signInWithPassword({
+  email,
+  password,
+});
+```
+
+**CORRECT:**
+```ts
+const { data, error: signInError } = await client.auth.signInWithPassword({
+  email: email.trim(),
+  password: password.trim(),
+});
+```
+
+**Rule:** Always trim login input (email and password) before calling
+`signInWithPassword` — GoTrue does an exact string match on both fields,
+so a single stray whitespace character (very easy to introduce via
+copy-paste from a credentials-display UI, especially one using
+stacked block-level elements rather than a single copyable field) causes
+a real login failure that's indistinguishable from a genuinely wrong
+password. When diagnosing a report like this, verify the account itself
+first (raw Auth API + `email_confirmed_at` + `public.users` role/
+is_active) before assuming the reported credentials are actually what
+was typed/pasted — a clean account plus a reproducible whitespace-only
+failure mode is strong evidence of this exact bug, not a data problem.
+
+---
+
 ## ➕ HOW TO ADD A NEW BUG
 
 When you fix a new bug, add it at the bottom of the relevant severity
