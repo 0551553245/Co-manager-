@@ -362,12 +362,26 @@ supabase login
 
 ### 3.2 — Link this repo to the live project and deploy the function
 
+**2026-07-29 fix:** the original command below (no `--no-verify-jwt`) causes
+a `401 Unauthorized` on every call, including from pg_cron in step 3.5 —
+Supabase's platform-level JWT verification is ON by default for every
+deployed Edge Function and runs *before* the function's own code, so it
+rejects the `CRON_SECRET` bearer token as an invalid JWT before
+`index.ts`'s own `Authorization` check ever executes. `supabase/config.toml`
+now has `verify_jwt = false` scoped to just this function (repo source of
+truth, so this doesn't regress on the next deploy), and `--no-verify-jwt` is
+added to the command below as a belt-and-suspenders flag — pass both.
+
 Run from the repo root (`C:\Co-Manager`):
 
 ```bash
 supabase link --project-ref zxssngjlspdjglofegni
-supabase functions deploy generate-daily-slots
+supabase functions deploy generate-daily-slots --no-verify-jwt
 ```
+
+**If you already deployed without this** (i.e. you're seeing the 401 right
+now): just re-run that same command — redeploying overwrites the previous
+version, no separate "undo" step needed.
 
 ### 3.3 — Set the function's shared secret
 

@@ -1,0 +1,14 @@
+project_id = "zxssngjlspdjglofegni"
+
+# generate-daily-slots is called by pg_cron/pg_net with a CRON_SECRET
+# bearer token (see PENDING_MANUAL_STEPS.md §3), not a Supabase JWT.
+# Supabase's platform-level JWT verification is ON by default for every
+# deployed Edge Function and runs BEFORE the function's own code — with
+# verify_jwt left at its default (true), the platform rejects the
+# CRON_SECRET token as an invalid JWT with 401 Unauthorized before our own
+# Authorization-header check in index.ts ever executes. Scoped to this one
+# function only — do not set this globally, since any future function
+# meant to be called from an authenticated browser client (with a real
+# Supabase user/anon JWT) should keep platform-level verification on.
+[functions.generate-daily-slots]
+verify_jwt = false

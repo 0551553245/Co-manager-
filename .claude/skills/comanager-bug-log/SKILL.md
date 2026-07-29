@@ -774,6 +774,57 @@ failure mode is strong evidence of this exact bug, not a data problem.
 
 ---
 
+### BUG #021 — Deployed Edge Function 401s on Its Own CRON_SECRET Check
+**Severity:** HIGH
+**Area/File:** `supabase/config.toml` (new), `supabase/functions/generate-daily-slots/`, `PENDING_MANUAL_STEPS.md` §3.2
+
+**Found during:** the founder deployed `generate-daily-slots` and called it
+with the documented `Authorization: Bearer <CRON_SECRET>` header, but got
+`401 Unauthorized` before ever reaching the function's own auth check
+(the one in `index.ts` comparing against `CRON_SECRET` and returning its
+own `401` with body `"Unauthorized"`) — the response had no body at all,
+which is the platform's own rejection, not ours.
+
+**The problem:** Supabase's platform-level JWT verification is **on by
+default** for every deployed Edge Function and runs *before* the
+function's code executes at all. It expects the `Authorization` header to
+carry a valid Supabase-issued JWT (anon key, service-role key, or a user
+session token) — our `CRON_SECRET` is an arbitrary shared secret, not a
+JWT, so the platform itself rejects it with `401` regardless of what
+`index.ts` does. This repo never had a `supabase/config.toml`, so there
+was nothing telling the CLI to disable that check for this specific
+function, and the deploy command documented in `PENDING_MANUAL_STEPS.md`
+didn't pass `--no-verify-jwt` either.
+
+**WRONG:**
+```bash
+supabase functions deploy generate-daily-slots
+# platform-level JWT verification stays on; any call with a
+# non-JWT Authorization header (like our CRON_SECRET) 401s before
+# index.ts's own check ever runs
+```
+
+**CORRECT:**
+```toml
+# supabase/config.toml — scoped to just this function, not global
+[functions.generate-daily-slots]
+verify_jwt = false
+```
+```bash
+supabase functions deploy generate-daily-slots --no-verify-jwt
+```
+
+**Rule:** Any Edge Function whose caller isn't a Supabase-authenticated
+client (cron jobs, webhooks, server-to-server calls using a custom shared
+secret) needs `verify_jwt = false` for that specific function in
+`supabase/config.toml` (and/or `--no-verify-jwt` on deploy) — otherwise
+the platform's own JWT check rejects the request before your function's
+code, including its own auth logic, ever runs. Never set this globally;
+scope it per-function so any future function meant to be called from an
+authenticated browser client keeps real JWT verification on.
+
+---
+
 ## ➕ HOW TO ADD A NEW BUG
 
 When you fix a new bug, add it at the bottom of the relevant severity
