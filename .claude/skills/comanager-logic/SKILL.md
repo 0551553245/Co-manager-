@@ -65,6 +65,17 @@ stated, treat as a plain field unless told otherwise.
   earlier draft that required checkout during signup; the confirmed flow is
   trial-first, card added later.
 
+**Branch cap — hard-capped at `subscriptions.branches_count` (confirmed
+2026-07-29):** this was genuinely unanswered here and in comanager-context
+until now — don't assume either way in future work without re-checking
+this note is still current. Creating a branch beyond `branches_count` is
+**blocked**, not auto-billed: show "Upgrade your plan to add more
+branches." `branches_count` only changes via an explicit paid upgrade
+(Phase 5, not built yet) — it never auto-increments when a branch is
+added. Same 3-layer enforcement as the manager cap below (UI, app, DB
+trigger `enforce_branch_cap`). Proration on a mid-cycle upgrade and
+refund/credit on branch removal are still open — see comanager-context.
+
 ---
 
 ## 2. Branch Manager Lifecycle (AUTH-CRITICAL)
@@ -141,35 +152,52 @@ touched it) at the cost of a scheduled job.
      row with `status: 'pending'` for every active daily task/standard, for
      every applicable branch (expand `branch_id: null` into one row per
      owner's branch — a global task still needs a per-branch slot).
+     **For tasks (2026-07-29, since a task is now a checklist):** also
+     generates one `task_item_submissions` row per active `task_item` on
+     that task, nested under the `task_submissions` row just created —
+     same pre-created-slot philosophy, one level deeper.
    - Only on **Monday** (Riyadh time): also generates slots for weekly tasks/standards.
    - Only on the **1st of the month** (Riyadh time): also generates slots
      for monthly tasks/standards.
 3. A second part of the same job (or a separate one) flips any `pending`
    slot whose due date has fully passed into `status: 'missed'` — this is
-   what makes a task "automatically missed" without anyone manually marking it.
-4. When a manager submits, that specific pre-created row updates from
-   `pending` → `completed` (or `pass`/`fail` for food safety) — never insert
-   a new row for a submission that already has a pending slot waiting.
+   what makes a task "automatically missed" without anyone manually marking
+   it. For tasks, this flips both the parent `task_submissions` row AND any
+   still-`pending` child `task_item_submissions` rows under it to `'missed'`.
+4. When a manager submits an item, that specific pre-created
+   `task_item_submissions` row updates from `pending` → `completed` (or
+   `pass`/`fail`/`missed` for food safety) — never insert a new row for a
+   submission that already has a pending slot waiting. Once **every** item
+   under a `task_submissions` row is `completed`, that parent row's own
+   `status` rolls up to `'completed'` too (comanager-conventions has the
+   exact query pattern for this rollup check).
 
 **Do not build a version where "due" is calculated live with no stored
 row** — that was rejected specifically to preserve missed-day history.
 
 ---
 
-## 5. Submission Requirements (per task/standard, set once at creation)
+## 5. Submission Requirements (set once at creation)
 
-Each task or food-safety standard has these boolean flags, chosen by the
-owner when creating it — this is what "owner chooses the submission method"
-means:
+Each **food-safety standard** has these boolean flags, chosen by the owner
+when creating it — this is what "owner chooses the submission method" means:
 ```
 requires_photo: boolean
 requires_note: boolean
 requires_value: boolean   (numeric, e.g. temperature)
 ```
-If **all three are false**, the item is checkbox-only — the manager just
-marks it done/pass with no additional proof required. Any combination of
-the three can be true at once (e.g. a food safety check might require both
-a photo AND a temperature value).
+
+**For tasks (changed 2026-07-29 — see the checklist model in
+comanager-context):** these three flags live on `task_items`, not on
+`tasks` itself — **per item**, not once for the whole task. A single
+task/checklist can freely mix items with different requirements (e.g. one
+item just a checkbox, another requiring a photo).
+
+If **all three are false** (for a food-safety standard, or for an
+individual task item), it's checkbox-only — the manager just marks it
+done/pass with no additional proof required. Any combination of the three
+can be true at once (e.g. a food safety check might require both a photo
+AND a temperature value).
 
 ---
 

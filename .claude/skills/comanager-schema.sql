@@ -46,6 +46,13 @@ alter table public.users
   add constraint users_branch_id_fkey
   foreign key (branch_id) references public.branches(id) on delete set null;
 
+-- A task is now a CHECKLIST (founder decision, 2026-07-29, resolving the
+-- comanager-context/comanager-design-match conflict — design-match showed
+-- "6 items" / "expand to see individual checklist items", the schema was
+-- flat). requires_photo/requires_note/requires_value/value_min/value_max
+-- moved OFF this table onto task_items — per-item requirements, not
+-- per-task (founder's explicit choice: "matches the mockup more
+-- literally" over the simpler once-per-task option).
 create table public.tasks (
   id uuid primary key default gen_random_uuid(),
   owner_id uuid not null references public.users(id) on delete cascade,
@@ -57,6 +64,20 @@ create table public.tasks (
   description_ar text,
   category text,
   frequency text not null check (frequency in ('daily','weekly','monthly')),
+  is_active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+-- Ordered checklist items belonging to a task. Every task should have at
+-- least one active item (enforced at the application level — a
+-- cross-table "at least one row" constraint isn't expressible as a simple
+-- CHECK, would need a trigger, not worth it for this).
+create table public.task_items (
+  id uuid primary key default gen_random_uuid(),
+  task_id uuid not null references public.tasks(id) on delete cascade,
+  title text not null,
+  title_ar text,
+  sort_order int not null default 0,
   requires_photo boolean not null default false,
   requires_note boolean not null default false,
   requires_value boolean not null default false,
@@ -66,21 +87,41 @@ create table public.tasks (
   created_at timestamptz not null default now()
 );
 
+-- The per-cycle "shell" row — still one per (task, branch, due_date),
+-- still pre-created by the midnight cron (comanager-logic §4 unchanged at
+-- this level). Its status is now a ROLLUP: 'completed' only once every
+-- child task_item_submissions row for this cycle is 'completed'. No
+-- longer carries photo_url/note/value_entered directly — those live on
+-- the item-level submissions now, since requirements are per-item.
 create table public.task_submissions (
   id uuid primary key default gen_random_uuid(),
   task_id uuid not null references public.tasks(id) on delete cascade,
   branch_id uuid not null references public.branches(id) on delete cascade,
   submitted_by uuid references public.users(id),
   status text not null default 'pending' check (status in ('pending','completed','missed')),
-  photo_url text,
-  note text,
-  value_entered numeric,
   due_date date not null,
   submitted_at timestamptz,
   -- Added 2026-07-27 for Phase 4 slot generation: the daily cron upserts
   -- with ON CONFLICT DO NOTHING on this key so re-running it never
   -- duplicates or resets an already-generated slot.
   unique (task_id, branch_id, due_date)
+);
+
+-- One row per task_item per cycle, nested under its parent
+-- task_submissions row — mirrors the same pre-created-slot philosophy at
+-- item granularity. The midnight cron creates these alongside the parent
+-- row (one per active task_item for that task).
+create table public.task_item_submissions (
+  id uuid primary key default gen_random_uuid(),
+  task_submission_id uuid not null references public.task_submissions(id) on delete cascade,
+  item_id uuid not null references public.task_items(id) on delete cascade,
+  status text not null default 'pending' check (status in ('pending','completed','missed')),
+  photo_url text,
+  note text,
+  value_entered numeric,
+  submitted_at timestamptz,
+  submitted_by uuid references public.users(id),
+  unique (task_submission_id, item_id)
 );
 
 create table public.food_safety_standards (
@@ -176,6 +217,48 @@ create table public.subscriptions (
 -- trial_ends_at default of 14 days — confirm the actual trial length with
 -- the founder before launch; the screenshot showed "9 days left" mid-trial,
 -- not the starting length.
+
+-- ------------------------------------------------------------
+-- 1b. HARD CAP: branch creation capped at subscriptions.branches_count
+-- Founder decision, 2026-07-29 (previously an open question, not in
+-- comanager-logic): creating a branch beyond the subscription's
+-- branches_count is BLOCKED, not auto-billed — the owner must upgrade
+-- first. Same 3-layer pattern as the manager cap below (UI, app, DB) —
+-- this trigger is the layer that actually matters.
+-- ------------------------------------------------------------
+
+create or replace function public.enforce_branch_cap()
+returns trigger
+language plpgsql
+security definer
+as $$
+declare
+  active_count int;
+  allowed_count int;
+begin
+  if new.is_active = true then
+    select count(*) into active_count
+    from public.branches
+    where owner_id = new.owner_id
+      and is_active = true
+      and id <> new.id;
+
+    select branches_count into allowed_count
+    from public.subscriptions
+    where owner_id = new.owner_id;
+
+    if allowed_count is not null and active_count >= allowed_count then
+      raise exception 'Branch limit reached for this subscription (% of % branches used)', active_count, allowed_count;
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+create trigger trg_enforce_branch_cap
+before insert or update on public.branches
+for each row
+execute function public.enforce_branch_cap();
 
 -- ------------------------------------------------------------
 -- 2. HARD CAP: max 2 active branch managers per branch
@@ -295,7 +378,9 @@ $$;
 alter table public.users enable row level security;
 alter table public.branches enable row level security;
 alter table public.tasks enable row level security;
+alter table public.task_items enable row level security;
 alter table public.task_submissions enable row level security;
+alter table public.task_item_submissions enable row level security;
 alter table public.food_safety_standards enable row level security;
 alter table public.food_safety_submissions enable row level security;
 alter table public.schedule_events enable row level security;
@@ -346,6 +431,27 @@ create policy "manager reads applicable tasks"
   on public.tasks for select
   using (branch_id = public.my_branch_id() or branch_id is null);
 
+-- ---- task_items ----
+-- Scoped through the parent task, same shape as tasks' own policies.
+create policy "super admin full access to task_items"
+  on public.task_items for all
+  using (public.my_role() = 'super_admin');
+
+create policy "owner manages own task_items"
+  on public.task_items for all
+  using (exists (select 1 from public.tasks t where t.id = task_items.task_id and t.owner_id = auth.uid()))
+  with check (exists (select 1 from public.tasks t where t.id = task_items.task_id and t.owner_id = auth.uid()));
+
+create policy "manager reads applicable task_items"
+  on public.task_items for select
+  using (
+    exists (
+      select 1 from public.tasks t
+      where t.id = task_items.task_id
+        and (t.branch_id = public.my_branch_id() or t.branch_id is null)
+    )
+  );
+
 -- ---- task_submissions ----
 create policy "super admin full access to task_submissions"
   on public.task_submissions for all
@@ -359,6 +465,40 @@ create policy "manager manages own branch submissions"
   on public.task_submissions for all
   using (branch_id = public.my_branch_id())
   with check (branch_id = public.my_branch_id());
+
+-- ---- task_item_submissions ----
+-- Scoped through the parent task_submissions row's branch_id, same shape
+-- as task_submissions' own policies.
+create policy "super admin full access to task_item_submissions"
+  on public.task_item_submissions for all
+  using (public.my_role() = 'super_admin');
+
+create policy "owner reads own branch task_item_submissions"
+  on public.task_item_submissions for select
+  using (
+    exists (
+      select 1 from public.task_submissions ts
+      where ts.id = task_item_submissions.task_submission_id
+        and public.is_my_branch(ts.branch_id)
+    )
+  );
+
+create policy "manager manages own branch task_item_submissions"
+  on public.task_item_submissions for all
+  using (
+    exists (
+      select 1 from public.task_submissions ts
+      where ts.id = task_item_submissions.task_submission_id
+        and ts.branch_id = public.my_branch_id()
+    )
+  )
+  with check (
+    exists (
+      select 1 from public.task_submissions ts
+      where ts.id = task_item_submissions.task_submission_id
+        and ts.branch_id = public.my_branch_id()
+    )
+  );
 
 -- ---- food_safety_standards ----
 create policy "super admin full access to fs standards"

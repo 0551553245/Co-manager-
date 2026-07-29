@@ -10,10 +10,12 @@
 //   1. Pre-create today's pending task_submissions / food_safety_submissions
 //      rows for every active daily task/standard (plus weekly on Monday,
 //      monthly on the 1st) — expanding branch_id: null into one row per
-//      owner's own active branches.
+//      owner's own active branches. Tasks are checklists now (2026-07-29):
+//      each task_submissions row also gets one task_item_submissions row
+//      per active task_item under that task, seeded at the same time.
 //   2. Flip any still-pending row whose due_date is now in the past to
 //      'missed' — this is what makes a slot "automatically missed" without
-//      anyone manually marking it.
+//      anyone manually marking it. Cascades down to item-level rows too.
 //
 // Idempotent: upserts with onConflict + ignoreDuplicates so re-running this
 // for the same day never resets or duplicates an already-generated slot
@@ -68,6 +70,24 @@ Deno.serve(async (req: Request) => {
     );
   }
 
+  const taskIds = (tasks ?? []).map((t) => t.id);
+  const { data: taskItems, error: taskItemsError } = await supabase
+    .from("task_items")
+    .select("id, task_id")
+    .eq("is_active", true)
+    .in("task_id", taskIds.length ? taskIds : ["00000000-0000-0000-0000-000000000000"]);
+  if (taskItemsError) {
+    return new Response(JSON.stringify({ step: "fetch task_items", error: taskItemsError.message }), {
+      status: 500,
+    });
+  }
+  const itemsByTask = new Map<string, string[]>();
+  (taskItems ?? []).forEach((i) => {
+    const list = itemsByTask.get(i.task_id) ?? [];
+    list.push(i.id);
+    itemsByTask.set(i.task_id, list);
+  });
+
   const ownerIds = Array.from(
     new Set([...(tasks ?? []).map((t) => t.owner_id), ...(standards ?? []).map((s) => s.owner_id)]),
   );
@@ -110,6 +130,7 @@ Deno.serve(async (req: Request) => {
     }));
   });
 
+  let itemSubRowsAttempted = 0;
   if (taskRows.length > 0) {
     const { error } = await supabase
       .from("task_submissions")
@@ -118,6 +139,42 @@ Deno.serve(async (req: Request) => {
       return new Response(JSON.stringify({ step: "upsert task_submissions", error: error.message }), {
         status: 500,
       });
+    }
+
+    // ignoreDuplicates upserts don't reliably return the rows they skipped,
+    // so re-select today's submissions (whether just-created or pre-existing
+    // from a prior run) to get real ids to hang item-level rows off of.
+    const { data: todaySubmissions, error: todaySubsError } = await supabase
+      .from("task_submissions")
+      .select("id, task_id")
+      .eq("due_date", riyadhToday)
+      .in("task_id", taskIds.length ? taskIds : ["00000000-0000-0000-0000-000000000000"]);
+    if (todaySubsError) {
+      return new Response(
+        JSON.stringify({ step: "fetch today's task_submissions", error: todaySubsError.message }),
+        { status: 500 },
+      );
+    }
+
+    const itemSubRows = (todaySubmissions ?? []).flatMap((sub) =>
+      (itemsByTask.get(sub.task_id) ?? []).map((itemId) => ({
+        task_submission_id: sub.id,
+        item_id: itemId,
+        status: "pending",
+      })),
+    );
+    itemSubRowsAttempted = itemSubRows.length;
+
+    if (itemSubRows.length > 0) {
+      const { error: itemSubError } = await supabase
+        .from("task_item_submissions")
+        .upsert(itemSubRows, { onConflict: "task_submission_id,item_id", ignoreDuplicates: true });
+      if (itemSubError) {
+        return new Response(
+          JSON.stringify({ step: "upsert task_item_submissions", error: itemSubError.message }),
+          { status: 500 },
+        );
+      }
     }
   }
 

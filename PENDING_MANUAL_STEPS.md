@@ -110,6 +110,177 @@ confirming this constraint doesn't exist yet.
 > `(task_id, branch_id, due_date)` (or the food-safety equivalent) —
 > deduplicate those rows first, then re-run.
 
+### 2.4 — Branch cap trigger (2026-07-29 decision)
+
+Branch creation is now hard-capped at `subscriptions.branches_count` —
+previously a genuinely open question (re-checked comanager-logic and
+comanager-context, neither answered it), now resolved: blocked until
+upgrade, not auto-billed. Same 3-layer pattern as the manager cap.
+
+```sql
+create or replace function public.enforce_branch_cap()
+returns trigger
+language plpgsql
+security definer
+as $$
+declare
+  active_count int;
+  allowed_count int;
+begin
+  if new.is_active = true then
+    select count(*) into active_count
+    from public.branches
+    where owner_id = new.owner_id
+      and is_active = true
+      and id <> new.id;
+
+    select branches_count into allowed_count
+    from public.subscriptions
+    where owner_id = new.owner_id;
+
+    if allowed_count is not null and active_count >= allowed_count then
+      raise exception 'Branch limit reached for this subscription (% of % branches used)', active_count, allowed_count;
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+create trigger trg_enforce_branch_cap
+before insert or update on public.branches
+for each row
+execute function public.enforce_branch_cap();
+```
+
+**Not yet run.** The app-level pre-check (layer 2) will be built alongside
+this, but this trigger is the layer that actually matters — don't skip it
+even after the app-level check ships.
+
+### 2.5 — Tasks-as-checklists: task_items + task_item_submissions (2026-07-29 decision)
+
+Resolved a real conflict between comanager-context (flat tasks schema)
+and comanager-design-match (task cards showing item counts, managers
+expanding to see individual items) — a task is now a checklist. Per-item
+submission requirements (founder's explicit choice over the simpler
+once-per-task option). **Run this whole block as one transaction** — it
+drops columns with live data (test task rows currently have
+`requires_photo`/etc. set at the task level) and adds two new tables in
+the same migration:
+
+```sql
+begin;
+
+-- New: ordered checklist items belonging to a task
+create table public.task_items (
+  id uuid primary key default gen_random_uuid(),
+  task_id uuid not null references public.tasks(id) on delete cascade,
+  title text not null,
+  title_ar text,
+  sort_order int not null default 0,
+  requires_photo boolean not null default false,
+  requires_note boolean not null default false,
+  requires_value boolean not null default false,
+  value_min numeric,
+  value_max numeric,
+  is_active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+-- requires_photo/note/value/value_min/value_max move OFF tasks onto
+-- task_items — this DROPS existing values on any live task rows.
+alter table public.tasks
+  drop column if exists requires_photo,
+  drop column if exists requires_note,
+  drop column if exists requires_value,
+  drop column if exists value_min,
+  drop column if exists value_max;
+
+-- task_submissions loses its own photo_url/note/value_entered — those
+-- move to the new item-level table below. This DROPS existing values on
+-- any live submission rows (test data only, expected).
+alter table public.task_submissions
+  drop column if exists photo_url,
+  drop column if exists note,
+  drop column if exists value_entered;
+
+-- New: one row per task_item per cycle, nested under its parent
+-- task_submissions row
+create table public.task_item_submissions (
+  id uuid primary key default gen_random_uuid(),
+  task_submission_id uuid not null references public.task_submissions(id) on delete cascade,
+  item_id uuid not null references public.task_items(id) on delete cascade,
+  status text not null default 'pending' check (status in ('pending','completed','missed')),
+  photo_url text,
+  note text,
+  value_entered numeric,
+  submitted_at timestamptz,
+  submitted_by uuid references public.users(id),
+  unique (task_submission_id, item_id)
+);
+
+alter table public.task_items enable row level security;
+alter table public.task_item_submissions enable row level security;
+
+create policy "super admin full access to task_items"
+  on public.task_items for all
+  using (public.my_role() = 'super_admin');
+
+create policy "owner manages own task_items"
+  on public.task_items for all
+  using (exists (select 1 from public.tasks t where t.id = task_items.task_id and t.owner_id = auth.uid()))
+  with check (exists (select 1 from public.tasks t where t.id = task_items.task_id and t.owner_id = auth.uid()));
+
+create policy "manager reads applicable task_items"
+  on public.task_items for select
+  using (
+    exists (
+      select 1 from public.tasks t
+      where t.id = task_items.task_id
+        and (t.branch_id = public.my_branch_id() or t.branch_id is null)
+    )
+  );
+
+create policy "super admin full access to task_item_submissions"
+  on public.task_item_submissions for all
+  using (public.my_role() = 'super_admin');
+
+create policy "owner reads own branch task_item_submissions"
+  on public.task_item_submissions for select
+  using (
+    exists (
+      select 1 from public.task_submissions ts
+      where ts.id = task_item_submissions.task_submission_id
+        and public.is_my_branch(ts.branch_id)
+    )
+  );
+
+create policy "manager manages own branch task_item_submissions"
+  on public.task_item_submissions for all
+  using (
+    exists (
+      select 1 from public.task_submissions ts
+      where ts.id = task_item_submissions.task_submission_id
+        and ts.branch_id = public.my_branch_id()
+    )
+  )
+  with check (
+    exists (
+      select 1 from public.task_submissions ts
+      where ts.id = task_item_submissions.task_submission_id
+        and ts.branch_id = public.my_branch_id()
+    )
+  );
+
+commit;
+```
+
+**Not yet run — blocks the new Tasks UI entirely until applied.** After
+running this, any existing test task rows will have no items yet (their
+old requires_* values are gone) — either delete the old test tasks
+("Opening Checklist" / "Closing Checklist") and recreate them with real
+items through the new UI, or manually insert a `task_items` row for each
+via the SQL Editor so they have at least one item.
+
 ---
 
 ## 3. Deploy and schedule the slot-generation Edge Function (from Phase 4)

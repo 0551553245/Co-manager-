@@ -10,6 +10,13 @@ interface TaskDef {
   id: string;
   title: string;
   title_ar: string | null;
+}
+interface TaskItem {
+  id: string;
+  task_id: string;
+  title: string;
+  title_ar: string | null;
+  sort_order: number;
   requires_photo: boolean;
   requires_note: boolean;
   requires_value: boolean;
@@ -20,14 +27,20 @@ interface TaskSub {
   id: string;
   task_id: string;
   status: "completed" | "pending" | "missed";
+}
+interface TaskItemSub {
+  id: string;
+  task_submission_id: string;
+  item_id: string;
+  status: "pending" | "completed" | "missed";
   note: string | null;
   value_entered: number | null;
   photo_url: string | null;
 }
 
-// Each task maps 1:1 to a single submission row today — the schema has no
-// sub-checklist-item concept, so "accordion of individual checklist items"
-// (comanager-design-match) is simplified to one expandable card per task.
+// A task is a checklist (comanager-context tasks/task_items, 2026-07-29) —
+// one accordion card per task_submissions row, expandable to show its own
+// task_items, each with its own task_item_submissions row for this cycle.
 export default function BranchManagerTasksPage() {
   const { loading, profile, client } = usePanelAuth(
     supabaseBranchManager,
@@ -36,7 +49,9 @@ export default function BranchManagerTasksPage() {
   );
 
   const [tasks, setTasks] = useState<TaskDef[]>([]);
+  const [items, setItems] = useState<TaskItem[]>([]);
   const [submissions, setSubmissions] = useState<TaskSub[]>([]);
+  const [itemSubs, setItemSubs] = useState<TaskItemSub[]>([]);
   const [dataLoading, setDataLoading] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
 
@@ -48,21 +63,39 @@ export default function BranchManagerTasksPage() {
     setDataLoading(true);
     const today = new Date().toISOString().slice(0, 10);
 
-    const [taskRes, subRes] = await Promise.all([
+    const [taskRes, itemRes, subRes] = await Promise.all([
       client
         .from("tasks")
-        .select("id, title, title_ar, requires_photo, requires_note, requires_value, value_min, value_max")
+        .select("id, title, title_ar")
         .or(`branch_id.eq.${profile.branch_id},branch_id.is.null`)
         .eq("is_active", true),
       client
+        .from("task_items")
+        .select("id, task_id, title, title_ar, sort_order, requires_photo, requires_note, requires_value, value_min, value_max")
+        .eq("is_active", true)
+        .order("sort_order"),
+      client
         .from("task_submissions")
-        .select("id, task_id, status, note, value_entered, photo_url")
+        .select("id, task_id, status")
         .eq("branch_id", profile.branch_id)
         .eq("due_date", today),
     ]);
 
     setTasks(taskRes.data ?? []);
+    setItems(itemRes.data ?? []);
     setSubmissions(subRes.data ?? []);
+
+    const submissionIds = (subRes.data ?? []).map((s) => s.id);
+    if (submissionIds.length > 0) {
+      const { data: itemSubData } = await client
+        .from("task_item_submissions")
+        .select("id, task_submission_id, item_id, status, note, value_entered, photo_url")
+        .in("task_submission_id", submissionIds);
+      setItemSubs(itemSubData ?? []);
+    } else {
+      setItemSubs([]);
+    }
+
     setDataLoading(false);
   }, [client, profile?.branch_id]);
 
@@ -71,9 +104,31 @@ export default function BranchManagerTasksPage() {
   }, [loading, profile, loadData]);
 
   useRealtimeTable(client, `branch-manager-tasks-${profile?.id ?? "anon"}`, "task_submissions", loadData);
+  useRealtimeTable(client, `branch-manager-tasks-items-${profile?.id ?? "anon"}`, "task_item_submissions", loadData);
 
   if (loading || !profile) {
     return <main className="p-8 text-sm text-ink/60">Loading...</main>;
+  }
+
+  // Once every item under a task_submissions row is completed, roll that
+  // parent row up to 'completed' too (comanager-logic §4). Client-side is
+  // safe here: at most 2 managers per branch, and setting status to the
+  // same value twice is harmless.
+  async function checkAndRollupParent(taskSubmissionId: string, taskId: string, submittedBy: string) {
+    const taskItemIds = items.filter((i) => i.task_id === taskId).map((i) => i.id);
+    const { data: freshItemSubs } = await client
+      .from("task_item_submissions")
+      .select("item_id, status")
+      .eq("task_submission_id", taskSubmissionId);
+    const allDone = taskItemIds.every(
+      (id) => freshItemSubs?.find((s) => s.item_id === id)?.status === "completed",
+    );
+    if (allDone) {
+      await client
+        .from("task_submissions")
+        .update({ status: "completed", submitted_by: submittedBy, submitted_at: new Date().toISOString() })
+        .eq("id", taskSubmissionId);
+    }
   }
 
   return (
@@ -89,6 +144,10 @@ export default function BranchManagerTasksPage() {
           {submissions.map((sub) => {
             const task = tasks.find((t) => t.id === sub.task_id);
             if (!task) return null;
+            const taskItems = items.filter((i) => i.task_id === task.id);
+            const doneCount = taskItems.filter(
+              (i) => itemSubs.find((s) => s.task_submission_id === sub.id && s.item_id === i.id)?.status === "completed",
+            ).length;
             // Urgency coloring, separate semantic from food-safety fail red
             // (comanager-design-match): pending = needs attention, missed =
             // stronger red, completed = green.
@@ -102,24 +161,44 @@ export default function BranchManagerTasksPage() {
                 >
                   <span className="font-display text-lg">{task.title}</span>
                   <span className="rounded-pill bg-ink/10 px-2 py-1 font-mono text-xs uppercase">
-                    {sub.status}
+                    {sub.status === "completed" ? "completed" : `${doneCount}/${taskItems.length} items`}
                   </span>
                 </button>
 
-                {expanded === sub.id && sub.status !== "completed" && (
-                  <TaskSubmissionForm
-                    task={task}
-                    submission={sub}
-                    client={client}
-                    submittedBy={profile.id}
-                    onSubmitted={loadData}
-                  />
-                )}
-                {expanded === sub.id && sub.status === "completed" && (
-                  <div className="mt-3 text-sm text-ink/60">
-                    {sub.note && <p>Note: {sub.note}</p>}
-                    {sub.value_entered !== null && <p>Value: {sub.value_entered}</p>}
-                    {task.requires_photo && <p className="italic">Photo evidence not available (upload not configured yet).</p>}
+                {expanded === sub.id && (
+                  <div className="mt-3 flex flex-col gap-3">
+                    {taskItems.map((item) => {
+                      const itemSub = itemSubs.find(
+                        (s) => s.task_submission_id === sub.id && s.item_id === item.id,
+                      );
+                      if (!itemSub) return null;
+                      return (
+                        <div key={item.id} className="rounded border p-3">
+                          <p className="text-sm font-bold">{item.title}</p>
+                          {itemSub.status === "pending" ? (
+                            <TaskItemSubmissionForm
+                              item={item}
+                              itemSubmission={itemSub}
+                              client={client}
+                              submittedBy={profile.id}
+                              onSubmitted={async () => {
+                                await checkAndRollupParent(sub.id, task.id, profile.id);
+                                await loadData();
+                              }}
+                            />
+                          ) : (
+                            <div className="mt-1 text-xs text-ink/60">
+                              <span className="uppercase">{itemSub.status}</span>
+                              {itemSub.note && <p>Note: {itemSub.note}</p>}
+                              {itemSub.value_entered !== null && <p>Value: {itemSub.value_entered}</p>}
+                              {item.requires_photo && (
+                                <p className="italic">Photo evidence not available (upload not configured yet).</p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -131,15 +210,15 @@ export default function BranchManagerTasksPage() {
   );
 }
 
-interface TaskSubmissionFormProps {
-  task: TaskDef;
-  submission: TaskSub;
+interface TaskItemSubmissionFormProps {
+  item: TaskItem;
+  itemSubmission: TaskItemSub;
   client: SupabaseClient;
   submittedBy: string;
   onSubmitted: () => void;
 }
 
-function TaskSubmissionForm({ task, submission, client, submittedBy, onSubmitted }: TaskSubmissionFormProps) {
+function TaskItemSubmissionForm({ item, itemSubmission, client, submittedBy, onSubmitted }: TaskItemSubmissionFormProps) {
   const [note, setNote] = useState("");
   const [value, setValue] = useState("");
   const [hasPhoto, setHasPhoto] = useState(false);
@@ -150,24 +229,24 @@ function TaskSubmissionForm({ task, submission, client, submittedBy, onSubmitted
     setError(null);
     // comanager-conventions: validate requires_photo/requires_note/requires_value
     // against what was actually provided, reject client-side before persisting.
-    if (task.requires_photo && !hasPhoto) return setError("A photo is required for this task.");
-    if (task.requires_note && !note.trim()) return setError("A note is required for this task.");
-    if (task.requires_value && value === "") return setError("A value is required for this task.");
+    if (item.requires_photo && !hasPhoto) return setError("A photo is required for this item.");
+    if (item.requires_note && !note.trim()) return setError("A note is required for this item.");
+    if (item.requires_value && value === "") return setError("A value is required for this item.");
 
     setSubmitting(true);
     const { error: updateError } = await client
-      .from("task_submissions")
+      .from("task_item_submissions")
       .update({
         status: "completed",
         submitted_by: submittedBy,
         submitted_at: new Date().toISOString(),
-        note: task.requires_note ? note : null,
-        value_entered: task.requires_value ? Number(value) : null,
+        note: item.requires_note ? note : null,
+        value_entered: item.requires_value ? Number(value) : null,
         // photo_url intentionally left null — no Cloudinary credentials
         // configured yet (flagged explicitly, decided to stub this rather
         // than fabricate a fake URL or block the whole feature on it).
       })
-      .eq("id", submission.id);
+      .eq("id", itemSubmission.id);
     setSubmitting(false);
 
     if (updateError) {
@@ -178,35 +257,35 @@ function TaskSubmissionForm({ task, submission, client, submittedBy, onSubmitted
   }
 
   return (
-    <div className="mt-3 flex flex-col gap-2">
+    <div className="mt-2 flex flex-col gap-2">
       {error && <p className="rounded bg-red/16 p-2 text-sm text-red-ink">{error}</p>}
-      {task.requires_photo && (
-        <label className="flex flex-col gap-1 text-sm">
+      {item.requires_photo && (
+        <label className="flex flex-col gap-1 text-xs">
           Photo (required) — upload not connected yet, this only marks the requirement met
           <input type="file" accept="image/*" onChange={(e) => setHasPhoto(!!e.target.files?.length)} />
         </label>
       )}
-      {task.requires_note && (
-        <label className="flex flex-col gap-1 text-sm">
+      {item.requires_note && (
+        <label className="flex flex-col gap-1 text-xs">
           Note
-          <textarea value={note} onChange={(e) => setNote(e.target.value)} className="rounded border p-2" />
+          <textarea value={note} onChange={(e) => setNote(e.target.value)} className="rounded border p-2 text-sm" />
         </label>
       )}
-      {task.requires_value && (
-        <label className="flex flex-col gap-1 text-sm">
-          Value {task.value_min !== null && task.value_max !== null ? `(${task.value_min}–${task.value_max})` : ""}
+      {item.requires_value && (
+        <label className="flex flex-col gap-1 text-xs">
+          Value {item.value_min !== null && item.value_max !== null ? `(${item.value_min}–${item.value_max})` : ""}
           <input
             type="number"
             value={value}
             onChange={(e) => setValue(e.target.value)}
-            className="rounded border p-2"
+            className="rounded border p-2 text-sm"
           />
         </label>
       )}
       <button
         onClick={handleSubmit}
         disabled={submitting}
-        className="mt-1 self-start rounded bg-green px-4 py-2 text-sm text-cream disabled:opacity-60"
+        className="mt-1 self-start rounded bg-green px-3 py-1.5 text-xs text-cream disabled:opacity-60"
       >
         {submitting ? "Submitting..." : "Mark done"}
       </button>

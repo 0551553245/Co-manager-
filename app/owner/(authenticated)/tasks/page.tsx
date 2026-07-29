@@ -5,7 +5,7 @@ import { supabaseOwner } from "@/lib/supabase/client";
 import { usePanelAuth } from "@/lib/auth/use-panel-auth";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { calcRate, completionBackgroundColor, completionColor } from "@/lib/utils/completion";
-import { TaskModal, type TaskFormValues } from "./TaskModal";
+import { TaskModal, type TaskFormValues, type TaskItemFormValues } from "./TaskModal";
 
 interface Task {
   id: string;
@@ -16,6 +16,14 @@ interface Task {
   description_ar: string | null;
   category: string | null;
   frequency: "daily" | "weekly" | "monthly";
+  is_active: boolean;
+}
+interface TaskItem {
+  id: string;
+  task_id: string;
+  title: string;
+  title_ar: string | null;
+  sort_order: number;
   requires_photo: boolean;
   requires_note: boolean;
   requires_value: boolean;
@@ -60,6 +68,7 @@ export default function TasksPage() {
 
   const [branches, setBranches] = useState<Branch[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [items, setItems] = useState<TaskItem[]>([]);
   const [submissions, setSubmissions] = useState<SubmissionRow[]>([]);
   const [dataLoading, setDataLoading] = useState(true);
   const [modal, setModal] = useState<ModalState>(null);
@@ -70,19 +79,22 @@ export default function TasksPage() {
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
     const since = sevenDaysAgo.toISOString().slice(0, 10);
 
-    const [{ data: branchData }, { data: taskData }, { data: subData }] = await Promise.all([
+    const [{ data: branchData }, { data: taskData }, { data: itemData }, { data: subData }] = await Promise.all([
       client.from("branches").select("id, name").eq("is_active", true).order("name"),
       client
         .from("tasks")
-        .select(
-          "id, branch_id, title, title_ar, description, description_ar, category, frequency, requires_photo, requires_note, requires_value, value_min, value_max, is_active",
-        )
+        .select("id, branch_id, title, title_ar, description, description_ar, category, frequency, is_active")
         .order("created_at", { ascending: false }),
+      client
+        .from("task_items")
+        .select("id, task_id, title, title_ar, sort_order, requires_photo, requires_note, requires_value, value_min, value_max, is_active")
+        .order("sort_order"),
       client.from("task_submissions").select("task_id, branch_id, due_date, status").gte("due_date", since),
     ]);
 
     setBranches(branchData ?? []);
     setTasks(taskData ?? []);
+    setItems(itemData ?? []);
     setSubmissions(subData ?? []);
     setDataLoading(false);
   }, [client]);
@@ -103,6 +115,10 @@ export default function TasksPage() {
 
   function branchCountForTask(task: Task) {
     return task.branch_id ? 1 : Math.max(branches.length, 1);
+  }
+
+  function activeItemsForTask(taskId: string) {
+    return items.filter((i) => i.task_id === taskId && i.is_active);
   }
 
   function todayStatsForTask(taskId: string) {
@@ -138,50 +154,95 @@ export default function TasksPage() {
     return strip;
   }
 
+  function itemToFormValues(item: TaskItem): TaskItemFormValues {
+    return {
+      id: item.id,
+      title: item.title,
+      title_ar: item.title_ar ?? "",
+      requiresPhoto: item.requires_photo,
+      requiresNote: item.requires_note,
+      requiresValue: item.requires_value,
+      valueMin: item.value_min?.toString() ?? "",
+      valueMax: item.value_max?.toString() ?? "",
+    };
+  }
+
   function taskToFormValues(task: Task): Partial<TaskFormValues> {
     return {
       title: task.title,
       title_ar: task.title_ar ?? "",
       frequency: task.frequency,
       branchId: task.branch_id ?? "",
-      requiresPhoto: task.requires_photo,
-      requiresNote: task.requires_note,
-      requiresValue: task.requires_value,
       description: task.description ?? "",
       description_ar: task.description_ar ?? "",
       category: task.category ?? "",
-      valueMin: task.value_min?.toString() ?? "",
-      valueMax: task.value_max?.toString() ?? "",
+      items: activeItemsForTask(task.id).map(itemToFormValues),
     };
+  }
+
+  // Duplicating must create brand-new items, not reuse existing item ids
+  // (those belong to the source task).
+  function taskToDuplicateFormValues(task: Task): Partial<TaskFormValues> {
+    const base = taskToFormValues(task);
+    return {
+      ...base,
+      title: `${task.title} (copy)`,
+      items: (base.items ?? []).map((item) => {
+        const rest: TaskItemFormValues = { ...item };
+        delete rest.id;
+        return rest;
+      }),
+    };
+  }
+
+  async function insertItems(taskId: string, taskItems: TaskItemFormValues[]) {
+    if (taskItems.length === 0) return null;
+    const rows = taskItems.map((it, index) => ({
+      task_id: taskId,
+      title: it.title,
+      title_ar: it.title_ar || null,
+      sort_order: index,
+      requires_photo: it.requiresPhoto,
+      requires_note: it.requiresNote,
+      requires_value: it.requiresValue,
+      value_min: it.valueMin ? Number(it.valueMin) : null,
+      value_max: it.valueMax ? Number(it.valueMax) : null,
+      is_active: true,
+    }));
+    const { error } = await client.from("task_items").insert(rows);
+    return error;
   }
 
   async function handleCreate(values: TaskFormValues): Promise<string | void> {
     if (!values.title.trim()) return "Title is required.";
-    const { error } = await client.from("tasks").insert({
-      owner_id: profile!.id,
-      created_by: profile!.id,
-      branch_id: values.branchId || null,
-      title: values.title,
-      title_ar: values.title_ar || null,
-      description: values.description || null,
-      description_ar: values.description_ar || null,
-      category: values.category || null,
-      frequency: values.frequency,
-      requires_photo: values.requiresPhoto,
-      requires_note: values.requiresNote,
-      requires_value: values.requiresValue,
-      value_min: values.valueMin ? Number(values.valueMin) : null,
-      value_max: values.valueMax ? Number(values.valueMax) : null,
-      is_active: true,
-    });
+    const { data, error } = await client
+      .from("tasks")
+      .insert({
+        owner_id: profile!.id,
+        created_by: profile!.id,
+        branch_id: values.branchId || null,
+        title: values.title,
+        title_ar: values.title_ar || null,
+        description: values.description || null,
+        description_ar: values.description_ar || null,
+        category: values.category || null,
+        frequency: values.frequency,
+        is_active: true,
+      })
+      .select("id")
+      .single();
     if (error) return error.message;
+
+    const itemsError = await insertItems(data.id, values.items);
+    if (itemsError) return itemsError.message;
+
     setModal(null);
     await loadData();
   }
 
   async function handleEdit(taskId: string, values: TaskFormValues): Promise<string | void> {
     // Edits apply going forward only — never touches existing
-    // task_submissions rows (comanager-logic §7 / comanager-context).
+    // task_submissions / task_item_submissions rows (comanager-logic §7).
     if (!values.title.trim()) return "Title is required.";
     const { error } = await client
       .from("tasks")
@@ -193,14 +254,50 @@ export default function TasksPage() {
         description_ar: values.description_ar || null,
         category: values.category || null,
         frequency: values.frequency,
-        requires_photo: values.requiresPhoto,
-        requires_note: values.requiresNote,
-        requires_value: values.requiresValue,
-        value_min: values.valueMin ? Number(values.valueMin) : null,
-        value_max: values.valueMax ? Number(values.valueMax) : null,
       })
       .eq("id", taskId);
     if (error) return error.message;
+
+    // Reconcile items: update existing ones (has id), insert new ones (no
+    // id), soft-delete ones the owner removed from the form (never hard
+    // delete — cascade would wipe that item's task_item_submissions
+    // history, same reasoning as branches/managers).
+    const existingIds = new Set(values.items.filter((it) => it.id).map((it) => it.id));
+    const removedIds = activeItemsForTask(taskId)
+      .map((it) => it.id)
+      .filter((id) => !existingIds.has(id));
+
+    const updates = values.items
+      .filter((it): it is TaskItemFormValues & { id: string } => !!it.id)
+      .map((it, index) =>
+        client
+          .from("task_items")
+          .update({
+            title: it.title,
+            title_ar: it.title_ar || null,
+            sort_order: index,
+            requires_photo: it.requiresPhoto,
+            requires_note: it.requiresNote,
+            requires_value: it.requiresValue,
+            value_min: it.valueMin ? Number(it.valueMin) : null,
+            value_max: it.valueMax ? Number(it.valueMax) : null,
+          })
+          .eq("id", it.id),
+      );
+
+    const newItems = values.items.filter((it) => !it.id);
+
+    const [updateResults, insertError] = await Promise.all([
+      Promise.all(updates),
+      insertItems(taskId, newItems),
+      removedIds.length > 0
+        ? client.from("task_items").update({ is_active: false }).in("id", removedIds)
+        : Promise.resolve({ error: null }),
+    ]);
+    const updateError = updateResults.find((r) => r.error)?.error;
+    if (updateError) return updateError.message;
+    if (insertError) return insertError.message;
+
     setModal(null);
     await loadData();
   }
@@ -238,6 +335,7 @@ export default function TasksPage() {
               ? (branches.find((b) => b.id === t.branch_id)?.name ?? "Branch")
               : "All branches";
             const strip = historyStrip(t.id);
+            const itemCount = activeItemsForTask(t.id).length;
 
             return (
               <div
@@ -253,27 +351,14 @@ export default function TasksPage() {
                     {rate}%
                   </span>
                 </div>
-                <p className="mt-1 text-sm text-ink/70">{scopeLabel}</p>
+                <p className="mt-1 text-sm text-ink/70">
+                  {scopeLabel} · {itemCount} item{itemCount === 1 ? "" : "s"}
+                </p>
 
                 <div className="mt-2 flex flex-wrap gap-1">
                   <span className="rounded-pill bg-green/16 px-2 py-1 font-mono text-[10px] font-bold uppercase text-green">
                     {FREQUENCY_LABEL[t.frequency]}
                   </span>
-                  {t.requires_photo && (
-                    <span className="rounded-pill bg-ink/10 px-2 py-1 font-mono text-[10px] font-bold uppercase">
-                      Photo
-                    </span>
-                  )}
-                  {t.requires_note && (
-                    <span className="rounded-pill bg-ink/10 px-2 py-1 font-mono text-[10px] font-bold uppercase">
-                      Note
-                    </span>
-                  )}
-                  {t.requires_value && (
-                    <span className="rounded-pill bg-ink/10 px-2 py-1 font-mono text-[10px] font-bold uppercase">
-                      Number
-                    </span>
-                  )}
                   {!t.is_active && (
                     <span className="rounded-pill bg-red/16 px-2 py-1 font-mono text-[10px] font-bold uppercase text-red-ink">
                       Inactive
@@ -334,7 +419,7 @@ export default function TasksPage() {
           title="Duplicate task"
           submitLabel="Create task"
           branches={branches}
-          initial={{ ...taskToFormValues(modal.task), title: `${modal.task.title} (copy)` }}
+          initial={taskToDuplicateFormValues(modal.task)}
           onCancel={() => setModal(null)}
           onSubmit={handleCreate}
         />

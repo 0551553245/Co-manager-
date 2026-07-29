@@ -54,13 +54,14 @@ export default function OwnerSettingsPage() {
     return <main className="p-8 text-sm text-red-ink">No subscription found for this account.</main>;
   }
 
-  // Use the actual current branch count for pricing display — the
-  // signup-time branches_count on the subscription row can drift as
-  // branches are added/removed later (comanager-context: open question on
-  // proration, not resolved yet — this just displays today's real number).
-  const effectiveBranchCount = branchCount || subscription.branches_count;
-  const monthlyTotal = effectiveBranchCount * subscription.price_per_branch_sar;
-  const managersIncluded = effectiveBranchCount * 2;
+  // branches_count is now the authoritative plan size, not a snapshot —
+  // branch creation is hard-capped at this value (comanager-logic §1,
+  // 2026-07-29), so it can never drift below the actual branch count the
+  // way it could under the old auto-increase assumption. Pricing is
+  // computed from the plan (branches_count), not the live branch count;
+  // branchCount is shown separately as usage against that plan.
+  const monthlyTotal = subscription.branches_count * subscription.price_per_branch_sar;
+  const managersIncluded = subscription.branches_count * 2;
 
   const trialEndsAt = new Date(subscription.trial_ends_at);
   const now = new Date();
@@ -98,8 +99,14 @@ export default function OwnerSettingsPage() {
         <div className="rounded-lg bg-card p-4 shadow-sm">
           <dl className="flex flex-col gap-2 text-sm">
             <div className="flex justify-between">
-              <dt className="text-ink/60">Branches</dt>
-              <dd className="font-mono">{effectiveBranchCount}</dd>
+              <dt className="text-ink/60">Branches on your plan</dt>
+              <dd className="font-mono">{subscription.branches_count}</dd>
+            </div>
+            <div className="flex justify-between">
+              <dt className="text-ink/60">Branches in use</dt>
+              <dd className="font-mono">
+                {branchCount}/{subscription.branches_count}
+              </dd>
             </div>
             <div className="flex justify-between">
               <dt className="text-ink/60">Managers included</dt>

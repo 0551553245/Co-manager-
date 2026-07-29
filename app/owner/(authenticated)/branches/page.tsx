@@ -33,13 +33,14 @@ export default function BranchesPage() {
   const [managerCounts, setManagerCounts] = useState<Record<string, number>>({});
   const [taskDefs, setTaskDefs] = useState<{ id: string; branch_id: string | null }[]>([]);
   const [todaySubs, setTodaySubs] = useState<{ branch_id: string; status: string }[]>([]);
+  const [branchesAllowed, setBranchesAllowed] = useState<number | null>(null);
   const [dataLoading, setDataLoading] = useState(true);
   const [modal, setModal] = useState<ModalState>(null);
 
   const loadData = useCallback(async () => {
     setDataLoading(true);
     const today = new Date().toISOString().slice(0, 10);
-    const [{ data: branchData }, { data: managerData }, { data: taskData }, { data: subData }] =
+    const [{ data: branchData }, { data: managerData }, { data: taskData }, { data: subData }, { data: subscription }] =
       await Promise.all([
         client
           .from("branches")
@@ -48,6 +49,7 @@ export default function BranchesPage() {
         client.from("users").select("branch_id").eq("role", "branch_manager").eq("is_active", true),
         client.from("tasks").select("id, branch_id").eq("is_active", true),
         client.from("task_submissions").select("branch_id, status").eq("due_date", today),
+        client.from("subscriptions").select("branches_count").single(),
       ]);
 
     setBranches(branchData ?? []);
@@ -58,6 +60,7 @@ export default function BranchesPage() {
     setManagerCounts(counts);
     setTaskDefs(taskData ?? []);
     setTodaySubs(subData ?? []);
+    setBranchesAllowed(subscription?.branches_count ?? null);
     setDataLoading(false);
   }, [client]);
 
@@ -82,6 +85,16 @@ export default function BranchesPage() {
   }
 
   async function handleCreate(values: BranchFormValues): Promise<string | void> {
+    // Layer 2 of 3 (comanager-logic §1 branch cap, same pattern as the
+    // manager cap in §2): fast, clean-error pre-check. The DB trigger
+    // (enforce_branch_cap, comanager-schema.sql) is layer 3 and the one
+    // that actually matters — this just avoids relying on it for the
+    // normal (non-racing) case.
+    const activeCount = branches.filter((b) => b.is_active).length;
+    if (branchesAllowed !== null && activeCount >= branchesAllowed) {
+      return "Upgrade your plan to add more branches.";
+    }
+
     const { error } = await client.from("branches").insert({
       owner_id: profile!.id,
       name: values.name,
@@ -122,17 +135,35 @@ export default function BranchesPage() {
     await loadData();
   }
 
+  const activeBranchCount = branches.filter((b) => b.is_active).length;
+  const atBranchCap = branchesAllowed !== null && activeBranchCount >= branchesAllowed;
+
   return (
     <main className="p-8">
       <div className="flex items-center justify-between">
-        <h1 className="font-display text-2xl">Branches</h1>
+        <div>
+          <h1 className="font-display text-2xl">Branches</h1>
+          {branchesAllowed !== null && (
+            <p className="text-sm text-ink/70">
+              {activeBranchCount}/{branchesAllowed} branches on your plan
+            </p>
+          )}
+        </div>
         <button
           onClick={() => setModal({ type: "create" })}
-          className="rounded bg-green px-4 py-2 text-sm text-cream"
+          disabled={atBranchCap}
+          title={atBranchCap ? "Upgrade your plan to add more branches" : undefined}
+          className="rounded bg-green px-4 py-2 text-sm text-cream disabled:opacity-60"
         >
           + Add branch
         </button>
       </div>
+
+      {atBranchCap && (
+        <p className="mt-4 rounded bg-amber/16 p-3 text-sm text-amber-ink">
+          Upgrade your plan to add more branches.
+        </p>
+      )}
 
       {dataLoading ? (
         <p className="mt-6 text-sm text-ink/60">Loading...</p>

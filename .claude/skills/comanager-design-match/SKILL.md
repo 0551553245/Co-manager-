@@ -18,6 +18,7 @@ description: Screen-by-screen inventory of the actual Co Manager UI screens (fro
 | "Free trial — 9 days left" WITH a card already on file | Correct as shown: free trial, **no card required at signup**, card added before trial ends | comanager-logic §1 |
 | Manager dashboard "Shift ends: 22:00" + shift progress ring | Mockup filler, not a real feature — managers don't have scheduled shift times in this product | Ignore entirely — don't build a shift system |
 | A "device toggle" icon (desktop/mobile) in every screen's header | Almost certainly a Claude Design preview artifact, not a real product control | Don't build this into the actual app unless told otherwise |
+| Task cards showing "6 items"/"8 items", manager expanding a task to see "individual checklist items" | This wasn't a mockup artifact — it was correct, and the schema was wrong. **A task is a checklist** with ordered `task_items`, each with its own requires_photo/note/value flags (per-item, not once-per-task — founder's explicit choice). Resolved 2026-07-29; comanager-context and comanager-schema.sql updated. | comanager-context tasks/task_items schema |
 
 ---
 
@@ -43,11 +44,11 @@ description: Screen-by-screen inventory of the actual Co Manager UI screens (fro
 - "+ Add manager" — this triggers the direct-create flow (temp password generated, credentials modal shown to owner) from comanager-auth.
 
 ### Tasks (`/owner/tasks`)
-- Grid of task cards: title, scope ("All branches · 6 items" or "Corniche — Jeddah · 8 items"), a **circular % ring** whose color follows the same red/amber/green gradient threshold as Reports (comanager-context Reporting Rules) — this confirms the gradient applies per-card, not just in aggregate charts.
-- Frequency badge (DAILY/WEEKLY/MONTHLY) + submission-requirement badges (Photo/Note/Number) — directly reflects the `requires_photo`/`requires_note`/`requires_value` flags from comanager-logic §5.
-- A **7-segment history strip** under each card — a compact row of small marks representing recent cycles' completion (color-coded: filled dark = completed, amber = partial/pending, gray = empty/not yet due). This is new — not previously in the schema. Needs a lightweight query: last 7 `task_submissions` rows for that task, ordered by due_date.
-- "Duplicate" button per card (clone a task's settings as a starting point for a new one).
-- "+ New task" opens the low-friction creation modal (comanager-logic §7).
+- Grid of task cards: title, scope ("All branches · 6 items" or "Corniche — Jeddah · 8 items") — **"N items" is the count of that task's active `task_items`** (resolved 2026-07-29, see Resolved Conflicts above), a **circular % ring** whose color follows the same red/amber/green gradient threshold as Reports (comanager-context Reporting Rules) — this confirms the gradient applies per-card, not just in aggregate charts.
+- Frequency badge (DAILY/WEEKLY/MONTHLY). Submission-requirement badges (Photo/Note/Number) are now **per item**, shown when expanding the card to its item list — not on the collapsed card itself, since different items on the same task can have different requirements (comanager-logic §5).
+- A **7-segment history strip** under each card — a compact row of small marks representing recent cycles' completion (color-coded: filled dark = completed, amber = partial/pending, gray = empty/not yet due). Still one strip per task (per `task_submissions` row, the rollup), not per item.
+- "Duplicate" button per card (clone a task's settings AND its items as a starting point for a new one).
+- "+ New task" opens the low-friction creation modal (comanager-logic §7) — items are added within that same modal (title + per-item requirement toggles, reorderable), not a separate screen.
 
 ### Food Safety (`/owner/food-safety`)
 - Alert banner when there are unresolved failures: "N unresolved food-safety failures", showing branch/standard/submitter/time for the most recent, a "View all" link, and an **Acknowledge** button — matches comanager-logic's fail-state flow exactly.
@@ -83,9 +84,10 @@ description: Screen-by-screen inventory of the actual Co Manager UI screens (fro
 - "Next scheduled event" card.
 
 ### Tasks (`/branch-manager/tasks`)
-- Accordion-style cards, one per task, expandable to show individual checklist items.
-- **Color-coded by urgency, not just pass/fail**: a task at 0% (not started) shows in red/pink — this is a different semantic use of red than "failed" elsewhere in the app (which is reserved for food-safety fails). Treat this as "needs attention" urgency coloring specific to the manager's own task list, separate from the pass/fail red used in Food Safety.
-- Expanded item shows a checkbox plus, conditionally, an "Add photo" button (if `requires_photo`) or an "Add a note..." input (if `requires_note`) — directly reflects the submission-requirement flags.
+- Accordion-style cards, one per task (per `task_submissions` row), expandable to show its individual checklist items (its `task_items`, each with its own `task_item_submissions` row for this cycle) — resolved 2026-07-29, this is a real per-item list now, not a flat single-submission task.
+- **Color-coded by urgency, not just pass/fail**: a task at 0% (no items done) shows in red/pink — this is a different semantic use of red than "failed" elsewhere in the app (which is reserved for food-safety fails). Treat this as "needs attention" urgency coloring specific to the manager's own task list, separate from the pass/fail red used in Food Safety.
+- Each expanded item shows a checkbox plus, conditionally, an "Add photo" button (if that item's own `requires_photo`) or an "Add a note..." input (if `requires_note`) — the requirement flags are per-item now, so different items on the same task can show different controls.
+- The parent task card's own status only becomes "done" once every item underneath it is submitted (client-side rollup after each item submission — see comanager-logic §4).
 
 ### Food Safety (`/branch-manager/food-safety`)
 - One card per standard: name, range, a reading input, Submit button.

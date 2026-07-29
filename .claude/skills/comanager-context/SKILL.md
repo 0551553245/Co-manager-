@@ -99,18 +99,51 @@ address, address_ar, city, phone, is_active, created_at
 id, branch_id (→ branches, NULLABLE — null means global task for all branches),
 created_by (→ users), title, title_ar, description, description_ar,
 category, frequency (daily | weekly | monthly),
-requires_photo (boolean), requires_note (boolean), requires_value (boolean),
-value_min, value_max, is_active (boolean, must be true on insert), created_at
+is_active (boolean, must be true on insert), created_at
 ```
+> **A task is a checklist, not a flat unit** — founder decision, 2026-07-29,
+> resolving a real conflict this doc had with comanager-design-match (which
+> showed "6 items"/"expand to see individual checklist items" against a
+> flat schema). `requires_photo`/`requires_note`/`requires_value`/
+> `value_min`/`value_max` moved OFF this table onto `task_items` — the
+> founder chose **per-item** requirements over the simpler once-per-task
+> option. Every task should have at least one active `task_item` (enforced
+> app-side, not a DB constraint).
+
+### task_items
+```
+id, task_id (→ tasks), title, title_ar, sort_order,
+requires_photo (boolean), requires_note (boolean), requires_value (boolean),
+value_min, value_max, is_active (boolean), created_at
+```
+> Added 2026-07-29. Ordered checklist items belonging to a task — each
+> with its own independent submission-requirement flags, same semantics
+> as comanager-logic §5 but at item granularity now instead of task
+> granularity.
 
 ### task_submissions
 ```
 id, task_id (→ tasks), submitted_by (→ users), branch_id (→ branches),
-status (completed | pending | missed),
-photo_url, note, value_entered, submitted_at, due_date
+status (completed | pending | missed), submitted_at, due_date
 ```
-> Column is `note` (not notes), `value_entered` (not numeric_value),
-> `submitted_at` (not submission_date — that column does not exist).
+> Column is `submitted_at` (not submission_date — that column does not
+> exist). Still one row per (task, branch, due_date), still pre-created by
+> the midnight cron (comanager-logic §4 unchanged at this level) — but as
+> of 2026-07-29 its `status` is a **rollup**: `completed` only once every
+> child `task_item_submissions` row for that cycle is `completed`. No
+> longer carries `photo_url`/`note`/`value_entered` directly (moved to the
+> item-level table below, since requirements are per-item now).
+
+### task_item_submissions
+```
+id, task_submission_id (→ task_submissions), item_id (→ task_items),
+status (pending | completed | missed), photo_url, note, value_entered,
+submitted_at, submitted_by (→ users)
+```
+> Added 2026-07-29. One row per `task_item` per cycle, nested under its
+> parent `task_submissions` row — mirrors the pre-created-slot philosophy
+> (comanager-logic §4) at item granularity. The midnight cron creates
+> these alongside the parent row.
 
 ### food_safety_standards
 ```
@@ -172,9 +205,20 @@ moyasar_token, created_at
 > Pricing model: **50 SAR per branch per month**, includes up to 2 branch
 > managers per branch. Not a fixed tier (basic/pro/enterprise) — that model
 > is retired. Trial: 14 days, read-only lockout for the owner if no card is
-> added by the end of trial (see comanager-logic §1 for exact scope). Open
-> questions still to lock before building billing UI: proration on
-> off-cycle branch additions, and refund/credit behavior on branch removal.
+> added by the end of trial (see comanager-logic §1 for exact scope).
+>
+> **Branch creation is hard-capped at `branches_count`** — founder decision,
+> 2026-07-29 (previously an open question; this doc didn't answer it and
+> neither did comanager-logic, confirmed by re-checking both before
+> building). Creating a branch beyond the subscription's `branches_count`
+> is blocked with an "Upgrade your plan to add more branches" message —
+> `branches_count` only changes via an explicit paid upgrade, never
+> auto-increments. Enforced in 3 layers (UI, app, DB trigger
+> `enforce_branch_cap`), same pattern as the manager cap.
+>
+> Still genuinely open: proration on an upgrade mid-cycle, and
+> refund/credit behavior on branch removal — neither resolved yet, don't
+> assume either way when building the actual upgrade flow (Phase 5).
 
 ---
 
