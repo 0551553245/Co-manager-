@@ -646,6 +646,73 @@ retrying" as a distinct, more serious failure mode than "not there yet."
 
 ---
 
+### BUG #019 — Cross-Owner Data Leak on Globally-Scoped Tasks/Standards/Events
+**Severity:** CRITICAL
+**Area/File:** `comanager-schema.sql` RLS policies for `tasks`,
+`food_safety_standards`, `schedule_events`
+
+**Found during:** live browser verification (2026-07-29) of the branch-cap
+and tasks-as-checklists work — a brand-new test owner account (freshly
+registered, 0 branches, 0 managers) immediately showed two pre-existing
+tasks ("Opening Checklist", "Opening Checklist (copy)") on its Tasks page
+that it never created. Traced to the RLS policy, not app code.
+
+**The problem:** `"manager reads applicable {tasks|fs standards|schedule
+events}"` is a separate PERMISSIVE `for select` policy alongside `"owner
+manages own {table}"` (a `for all` policy scoped to `owner_id =
+auth.uid()`). Postgres OR's all permissive policies together for a given
+command — so a row is visible if it satisfies EITHER policy. The manager
+policy's `branch_id is null` arm has no ownership check at all, and
+`my_branch_id()` returns NULL for every owner (owners have no `branch_id`
+on their `users` row), so `branch_id = my_branch_id()` never matches for
+an owner but `branch_id is null` always does. Net effect: every owner (and
+every branch manager) on the entire platform could `select` every OTHER
+owner's globally-scoped ("all branches") tasks, food-safety standards, and
+schedule events — a real multi-tenant data isolation break, not just a
+theoretical one (reproduced live).
+
+**WRONG:**
+```sql
+create policy "manager reads applicable tasks"
+  on public.tasks for select
+  using (branch_id = public.my_branch_id() or branch_id is null);
+  -- the `or branch_id is null` arm matches ANY owner's global tasks,
+  -- for ANY other authenticated user, since it never checks owner_id
+```
+
+**CORRECT:**
+```sql
+create or replace function public.my_owner_id()
+returns uuid language sql security definer stable as $$
+  select case
+    when public.my_role() = 'owner' then auth.uid()
+    else (select owner_id from public.branches where id = public.my_branch_id())
+  end;
+$$;
+
+create policy "manager reads applicable tasks"
+  on public.tasks for select
+  using (
+    branch_id = public.my_branch_id()
+    or (branch_id is null and owner_id = public.my_owner_id())
+  );
+```
+
+**Rule:** Any RLS policy with a `branch_id is null` (or similarly
+"global-scope") arm MUST also check ownership on that arm — `is null`
+alone is never sufficient, because NULL matches across every tenant, not
+just the current one. When auditing multi-tenant RLS, check each
+PERMISSIVE policy on a table together (they OR together for the same
+command), not just each policy in isolation — a narrow-looking policy on
+one row's `using` clause can still widen what's visible when combined
+with a sibling policy for the same command. Applies to `tasks`,
+`food_safety_standards`, and `schedule_events` identically; fixed in all
+three in the same pass. **Manual SQL to apply this fix live is in
+PENDING_MANUAL_STEPS.md — not yet applied to the live DB as of this
+writing.**
+
+---
+
 ## ➕ HOW TO ADD A NEW BUG
 
 When you fix a new bug, add it at the bottom of the relevant severity

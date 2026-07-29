@@ -371,6 +371,25 @@ as $$
   );
 $$;
 
+-- The owner_id this user's data should be scoped to: the user's own id if
+-- they ARE the owner, otherwise the owner_id of their assigned branch (for
+-- branch managers). Added 2026-07-29 to fix BUG#019 — see comanager-bug-log
+-- — the "manager reads applicable X" policies below used to check only
+-- `branch_id is null`, with no ownership check at all, so every owner's
+-- own globally-scoped (branch_id is null) tasks/standards/events leaked to
+-- every OTHER owner's account too.
+create or replace function public.my_owner_id()
+returns uuid
+language sql
+security definer
+stable
+as $$
+  select case
+    when public.my_role() = 'owner' then auth.uid()
+    else (select owner_id from public.branches where id = public.my_branch_id())
+  end;
+$$;
+
 -- ------------------------------------------------------------
 -- 5. ROW LEVEL SECURITY — enable on every data table
 -- ------------------------------------------------------------
@@ -427,9 +446,15 @@ create policy "owner manages own tasks"
   using (owner_id = auth.uid())
   with check (owner_id = auth.uid());
 
+-- Fixed 2026-07-29 (BUG#019): the branch_id-is-null arm used to have no
+-- ownership check at all, leaking every owner's all-branches tasks to
+-- every other owner's account. Now scoped to the manager's own owner.
 create policy "manager reads applicable tasks"
   on public.tasks for select
-  using (branch_id = public.my_branch_id() or branch_id is null);
+  using (
+    branch_id = public.my_branch_id()
+    or (branch_id is null and owner_id = public.my_owner_id())
+  );
 
 -- ---- task_items ----
 -- Scoped through the parent task, same shape as tasks' own policies.
@@ -442,13 +467,19 @@ create policy "owner manages own task_items"
   using (exists (select 1 from public.tasks t where t.id = task_items.task_id and t.owner_id = auth.uid()))
   with check (exists (select 1 from public.tasks t where t.id = task_items.task_id and t.owner_id = auth.uid()));
 
+-- Same BUG#019 leak pattern as tasks/fs standards/schedule_events would
+-- apply here too if left as `t.branch_id is null` with no ownership
+-- check — fixed inline before this table was ever applied live.
 create policy "manager reads applicable task_items"
   on public.task_items for select
   using (
     exists (
       select 1 from public.tasks t
       where t.id = task_items.task_id
-        and (t.branch_id = public.my_branch_id() or t.branch_id is null)
+        and (
+          t.branch_id = public.my_branch_id()
+          or (t.branch_id is null and t.owner_id = public.my_owner_id())
+        )
     )
   );
 
@@ -510,9 +541,13 @@ create policy "owner manages own fs standards"
   using (owner_id = auth.uid())
   with check (owner_id = auth.uid());
 
+-- Fixed 2026-07-29 (BUG#019) — same cross-owner leak fix as tasks above.
 create policy "manager reads applicable fs standards"
   on public.food_safety_standards for select
-  using (branch_id = public.my_branch_id() or branch_id is null);
+  using (
+    branch_id = public.my_branch_id()
+    or (branch_id is null and owner_id = public.my_owner_id())
+  );
 
 -- ---- food_safety_submissions ----
 create policy "super admin full access to fs submissions"
@@ -539,9 +574,13 @@ create policy "owner manages own schedule_events"
   using (owner_id = auth.uid())
   with check (owner_id = auth.uid());
 
+-- Fixed 2026-07-29 (BUG#019) — same cross-owner leak fix as tasks above.
 create policy "manager reads applicable schedule_events"
   on public.schedule_events for select
-  using (branch_id = public.my_branch_id() or branch_id is null);
+  using (
+    branch_id = public.my_branch_id()
+    or (branch_id is null and owner_id = public.my_owner_id())
+  );
 
 -- ---- notifications ----
 create policy "users read own notifications"

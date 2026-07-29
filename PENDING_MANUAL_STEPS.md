@@ -156,7 +156,67 @@ execute function public.enforce_branch_cap();
 this, but this trigger is the layer that actually matters — don't skip it
 even after the app-level check ships.
 
-### 2.5 — Tasks-as-checklists: task_items + task_item_submissions (2026-07-29 decision)
+### 2.5 — CRITICAL: fix cross-owner RLS data leak (BUG#019, 2026-07-29) — run before 2.6
+
+**Found during live verification of the branch-cap/checklist work**: a
+brand-new test owner account (0 branches, 0 managers, just registered)
+immediately showed two pre-existing tasks ("Opening Checklist", "Opening
+Checklist (copy)" — the exact test tasks mentioned in §2.6 below,
+belonging to a *different* owner) on its own Tasks page. Root cause: the
+`"manager reads applicable {tasks|fs standards|schedule_events}"` RLS
+policies check only `branch_id = my_branch_id() or branch_id is null`,
+with no ownership check on the `is null` arm. Since Postgres OR's all
+permissive `select` policies on a table together, this `is null` arm
+matches *every* owner's globally-scoped rows for *every other* owner too
+— any owner or branch manager on the platform can currently read any other
+owner's "all branches" tasks, food-safety standards, and schedule events.
+See comanager-bug-log BUG #019 for the full writeup. This is a genuine
+multi-tenant data isolation break — treat as higher priority than the
+other items in this file.
+
+```sql
+create or replace function public.my_owner_id()
+returns uuid
+language sql
+security definer
+stable
+as $$
+  select case
+    when public.my_role() = 'owner' then auth.uid()
+    else (select owner_id from public.branches where id = public.my_branch_id())
+  end;
+$$;
+
+drop policy "manager reads applicable tasks" on public.tasks;
+create policy "manager reads applicable tasks"
+  on public.tasks for select
+  using (
+    branch_id = public.my_branch_id()
+    or (branch_id is null and owner_id = public.my_owner_id())
+  );
+
+drop policy "manager reads applicable fs standards" on public.food_safety_standards;
+create policy "manager reads applicable fs standards"
+  on public.food_safety_standards for select
+  using (
+    branch_id = public.my_branch_id()
+    or (branch_id is null and owner_id = public.my_owner_id())
+  );
+
+drop policy "manager reads applicable schedule_events" on public.schedule_events;
+create policy "manager reads applicable schedule_events"
+  on public.schedule_events for select
+  using (
+    branch_id = public.my_branch_id()
+    or (branch_id is null and owner_id = public.my_owner_id())
+  );
+```
+
+**Not yet run.** `my_owner_id()` must exist before §2.6 runs, since the new
+`task_items` table's own RLS policy (below) also uses it — that's why this
+section is now numbered ahead of the tasks-as-checklists migration.
+
+### 2.6 — Tasks-as-checklists: task_items + task_item_submissions (2026-07-29 decision)
 
 Resolved a real conflict between comanager-context (flat tasks schema)
 and comanager-design-match (task cards showing item counts, managers
@@ -236,7 +296,10 @@ create policy "manager reads applicable task_items"
     exists (
       select 1 from public.tasks t
       where t.id = task_items.task_id
-        and (t.branch_id = public.my_branch_id() or t.branch_id is null)
+        and (
+          t.branch_id = public.my_branch_id()
+          or (t.branch_id is null and t.owner_id = public.my_owner_id())
+        )
     )
   );
 
