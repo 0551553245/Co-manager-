@@ -1534,6 +1534,109 @@ time expecting an empty result instead of the unchanged rows.
 
 ---
 
+### BUG #033 — Owner Login Stuck Forever on "Signing in..." on the Live Site: Missing Vercel Env Vars + No try/catch to Surface It
+**Severity:** CRITICAL
+**Area/File:** Vercel dashboard config (root cause); `lib/auth/use-login-form.ts` (defensive fix)
+
+**Found during:** "owner login gets stuck loading, never redirects"
+report on the live deployment (2026-07-30) — explicitly NOT reproducible
+on localhost (which has a valid `.env.local`), so reproduced directly
+against `https://co-manager-seven.vercel.app` as instructed.
+
+**Root cause, confirmed by decompiling the actual deployed bundle:**
+fetched `_next/static/chunks/app/owner/login/page-*.js` from the live
+site and found the compiled `makeBrowserClient` still reads
+`a.env.NEXT_PUBLIC_SUPABASE_URL` as a live runtime property lookup.
+Next.js's build step replaces `NEXT_PUBLIC_*` vars with literal string
+constants via webpack's DefinePlugin *whenever they're present at build
+time* — a bundle that still has a runtime lookup proves the var was
+absent from Vercel's build environment entirely, not just missing at
+request time. `.env.local` is gitignored and never deploys; Vercel needs
+every env var configured separately in its own dashboard, and this
+project's apparently never were.
+
+**Confirmed live** by injecting `window.addEventListener('unhandledrejection',
+...)` before submitting the real login form on the live site: clicking
+"Sign in" threw `"@supabase/ssr: Your project's URL and API key are
+required to create a Supabase client!"` — `createBrowserClient(undefined,
+undefined, ...)`.
+
+**The compounding app-code bug:** `useLoginForm`'s `handleSubmit` had no
+`try`/`catch` around any of this. `setSubmitting(true)` runs first; the
+throw happens inside the `try`-less body; nothing ever reaches
+`setSubmitting(false)`. The result: the button is stuck on "Signing
+in..." forever with zero visible error and no way to retry short of a
+full page reload — exactly the reported symptom. This wasn't specific to
+the missing env vars either — ANY unexpected throw in this function
+(network blip, a future Supabase client change, anything) would have
+produced the identical permanent hang.
+
+**Explicitly ruled out before landing on the real cause:** the recently-
+changed Vercel function region (`sin1`) — confirmed still correctly
+deployed and serving via the `x-vercel-id` header; and any hardcoded
+`localhost` reference in the auth/redirect flow — grepped the whole repo,
+found none (the only "localhost" hit was a comment in
+`panel-auth-context.tsx`, not a URL). Neither was the cause.
+
+**WRONG:**
+```ts
+async function handleSubmit(e: FormEvent) {
+  e.preventDefault();
+  setSubmitting(true);
+  setError(null);
+
+  const client = createClient(); // can throw synchronously
+  const { data, error: signInError } = await client.auth.signInWithPassword({...});
+  // ...every other setSubmitting(false) call lives inside this same
+  // try-less body — a throw anywhere above skips all of them
+}
+```
+
+**CORRECT:**
+```ts
+async function handleSubmit(e: FormEvent) {
+  e.preventDefault();
+  setSubmitting(true);
+  setError(null);
+
+  try {
+    const client = createClient();
+    const { data, error: signInError } = await client.auth.signInWithPassword({...});
+    // ...rest of the flow, unchanged...
+  } catch (err) {
+    console.error("Unexpected error during login:", err);
+    setError("Something went wrong. Please try again.");
+    setSubmitting(false);
+  }
+}
+```
+
+**Verified live, both directions, on localhost** (can't intentionally
+break the live site's env vars to test): temporarily blanked
+`NEXT_PUBLIC_SUPABASE_URL` in `.env.local`, restarted the dev server,
+submitted login — confirmed the button now shows "Something went wrong.
+Please try again." and resets to clickable, instead of hanging. Restored
+the real value, restarted again, confirmed normal login still redirects
+to the dashboard correctly (no regression).
+
+**Not yet fixable end-to-end from this environment** — the actual root
+cause is Vercel dashboard configuration (no CLI/API access here). Manual
+steps are in PENDING_MANUAL_STEPS.md §5. The try/catch fix ships
+regardless — it turns this specific failure (and any future one like it)
+from a silent infinite hang into a visible, retryable error, but doesn't
+by itself make login work on the live site until the env vars are added.
+
+**Rule:** Any function that sets a loading/submitting flag before doing
+async work must wrap that work in try/catch (or equivalent) and reset the
+flag in the catch — never assume the only exits are the explicit
+early-return branches you wrote. An uncaught throw between "start
+loading" and "stop loading" stands up a permanently stuck UI with no
+error shown, which is worse than a clear error: a stuck spinner gives the
+user no signal that anything is even wrong, let alone what to do about
+it.
+
+---
+
 ## ➕ HOW TO ADD A NEW BUG
 
 When you fix a new bug, add it at the bottom of the relevant severity

@@ -496,6 +496,78 @@ before running the `alter publication` above would confirm the diagnosis.
 
 ---
 
+## 5. CRITICAL: Set environment variables in the Vercel dashboard (2026-07-30)
+
+**Found during:** debugging "owner login gets stuck on the live site,
+never redirects" — reproduced directly on
+`https://co-manager-seven.vercel.app`. Root-caused by pulling the actual
+deployed JS bundle (`_next/static/chunks/app/owner/login/page-*.js`) and
+reading the compiled `makeBrowserClient` function: it still read
+`a.env.NEXT_PUBLIC_SUPABASE_URL` as a live runtime property lookup,
+instead of having the literal URL string baked in as a constant. Next.js
+inlines `NEXT_PUBLIC_*` vars as string literals via webpack's
+DefinePlugin *whenever they're present at build time* — the fact that
+the deployed bundle still had a runtime lookup proves
+`NEXT_PUBLIC_SUPABASE_URL` (and almost certainly
+`NEXT_PUBLIC_SUPABASE_ANON_KEY` alongside it) was never set in Vercel's
+own environment variables at all. `.env.local` is gitignored and never
+deploys — Vercel needs every one of these configured separately in its
+own dashboard, and this project's env vars have apparently never been
+set there.
+
+**What actually happened on click "Sign in":** `createClient()` calls
+`createBrowserClient(undefined, undefined, ...)`, which throws
+`"@supabase/ssr: Your project's URL and API key are required to create a
+Supabase client!"` — confirmed live by instrumenting
+`window.addEventListener('unhandledrejection', ...)` before submitting on
+the real deployed site. `useLoginForm`'s `handleSubmit` had no
+`try`/`catch` around this (fixed separately, see BUG#033 in
+comanager-bug-log), so the
+throw became a silently-swallowed unhandled rejection: `submitting` was
+already `true`, and nothing ever set it back to `false` — the button was
+stuck on "Signing in..." forever with zero visible error. That code fix
+now surfaces a clear "Something went wrong. Please try again." message
+instead, but it can't fix the *actual* missing env vars — that's Vercel
+dashboard-only, outside anything in this repo.
+
+**Not related to the `sin1` region change** or anything hardcoded to
+localhost — checked both explicitly; neither was the cause.
+
+### What to do
+
+1. Vercel dashboard → this project → **Settings → Environment
+   Variables**.
+2. Add every variable from `.env.local.example`, scoped to at least
+   **Production** (add to Preview/Development too if you want branch
+   deploys and `vercel dev` to work the same way):
+   - `NEXT_PUBLIC_SUPABASE_URL`
+   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+   - `SUPABASE_SERVICE_ROLE_KEY`
+   - `CLOUDINARY_CLOUD_NAME` / `CLOUDINARY_API_KEY` / `CLOUDINARY_API_SECRET`
+     (or the combined `CLOUDINARY_URL` — either format works, see
+     `lib/cloudinary/upload-photo.ts`)
+   - `NEXT_PUBLIC_SITE_URL` (recommended — e.g. `https://co-manager-seven.vercel.app`)
+   Use the exact same values already in your local `.env.local`.
+3. **Trigger a fresh deploy after adding them** — `NEXT_PUBLIC_*` vars are
+   baked into the JS bundle at *build* time, not read at runtime. Adding
+   them in the dashboard alone does not fix the already-built deployment;
+   either click **Redeploy** on the latest deployment in Vercel, or push
+   any new commit.
+4. Only `NEXT_PUBLIC_SUPABASE_URL`/`NEXT_PUBLIC_SUPABASE_ANON_KEY` were
+   directly proven missing (via the bundle inspection above) — the
+   server-only vars (`SUPABASE_SERVICE_ROLE_KEY`, `CLOUDINARY_*`) can't be
+   checked the same way since they're never sent to the browser at all,
+   but given none of them appear to have ever been configured, assume
+   they're missing too and set all of them together. If they *are*
+   missing, registration (`app/owner/register/actions.ts`) and photo
+   upload (`lib/cloudinary/upload-photo.ts`) are very likely broken on
+   the live site as well, for the identical reason.
+
+**Not yet run.** After running, re-test login directly on the live URL —
+should redirect to the dashboard, not hang.
+
+---
+
 ## 6. Audit fixes #1 and #3 (2026-07-30) — run both, either order
 
 ### 6.1 — CRITICAL: narrow manager RLS from `for all` to `select`+`update` (audit finding #1)
