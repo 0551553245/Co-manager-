@@ -654,6 +654,67 @@ logic the triggers call.
 
 **Not yet run.**
 
+### 6.3 — CRITICAL: my_role()/my_branch_id() never checked is_active (2026-07-30)
+
+**Verified live against the current, unpatched DB:** signed in as a real,
+active branch manager, confirmed their session could read their branch's
+`task_submissions`, then deactivated that same account via service role
+mid-session (simulating an owner clicking "Deactivate"), then retried the
+*exact same* raw REST call with the *exact same, never-refreshed* access
+token — it returned the same rows, unchanged, as if nothing had happened.
+Root cause: `my_role()` and `my_branch_id()` — the two functions nearly
+every RLS policy in this schema is built on — only ever checked
+`id = auth.uid()`, never `is_active`. Deactivating a `public.users` row
+doesn't revoke that user's Supabase Auth session (Supabase Auth has no
+awareness that this app-level column even exists), so a fired/suspended
+employee whose JWT hasn't separately expired could keep pulling live
+operational data indefinitely via direct REST calls — `is_active` was
+being enforced only by the app's own client-side `usePanelAuth` check,
+never by RLS. Same class of gap as BUG#019/#024, just for account status
+instead of ownership scoping.
+
+```sql
+create or replace function public.my_role()
+returns text
+language sql
+security definer
+stable
+as $$
+  select role from public.users where id = auth.uid() and is_active = true;
+$$;
+
+create or replace function public.my_branch_id()
+returns uuid
+language sql
+security definer
+stable
+as $$
+  select branch_id from public.users where id = auth.uid() and is_active = true;
+$$;
+```
+
+`my_owner_id()` needs no change — it's built entirely out of these two
+functions, so it already returns null for a deactivated caller once they
+do. `create or replace function` again — no trigger or policy needs to be
+touched individually, every policy built on `my_role()`/`my_branch_id()`
+automatically stops matching for a deactivated user the moment this runs.
+
+**Known residual gap, deliberately not fixed here:** owner-scoped
+policies (`owner_id = auth.uid()` on `branches`, `tasks`, `task_items`,
+`food_safety_standards`, `schedule_events`, `subscriptions`, and
+`is_my_branch()`) check `auth.uid()` directly, not through
+`my_role()`/`my_branch_id()` — so this fix does **not** close the
+equivalent gap for a deactivated *owner* account. Left alone because
+there's currently no in-app feature to deactivate an owner's own account
+(only managers, via the owner's own "Deactivate" button) — flagging this
+as a real, known, currently-theoretical gap rather than fixing it
+unprompted, same as how this fix itself was flagged before being asked
+for.
+
+**Not yet run.** After running, re-verify with the same live-deactivation
+test above — the retried raw REST call should come back `200` with an
+**empty array**, not the same rows.
+
 ---
 
 ## 7. Not blocking today, but needed before real use

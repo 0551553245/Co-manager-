@@ -1452,6 +1452,88 @@ periodically refresh), not duplicated per-page.
 
 ---
 
+### BUG #032 — my_role()/my_branch_id() Never Checked is_active — Deactivation Was Enforced Only Client-Side, Not by RLS
+**Severity:** CRITICAL
+**Area/File:** `comanager-schema.sql` — `my_role()`, `my_branch_id()`
+
+**Found during:** flagged as a residual finding while verifying BUG#031's
+safety (2026-07-30), then fixed this same day at the founder's explicit
+request.
+
+**Verified live against the unpatched DB:** signed in as a real, active
+branch manager and confirmed their session could read their branch's
+`task_submissions` (baseline). Deactivated that same account via
+service-role `PATCH .../users?id=eq....` (simulating an owner clicking
+"Deactivate"), **without** touching the manager's Supabase Auth session
+at all. Retried the *exact same* raw REST call with the *exact same,
+never-refreshed* access token — it returned the identical rows, as if
+deactivation had never happened.
+
+**The problem:** deactivating a `public.users` row doesn't revoke that
+user's underlying Supabase Auth session — Supabase Auth has no awareness
+that this app-level `is_active` column even exists. The app's own
+`usePanelAuth` hook checks `is_active` and bounces a deactivated user to
+the login screen, but that check only runs inside the app's own UI. A raw
+REST call using a still-valid access token bypasses it entirely — and
+until this fix, RLS had nothing checking `is_active` either, since
+`my_role()`/`my_branch_id()` (the functions nearly every policy in this
+schema is built on) only ever matched on `id = auth.uid()`. A
+fired/suspended employee could keep pulling live operational data
+indefinitely via direct API calls, with no server-side enforcement at
+all. Same class of gap as BUG#019/#024 (an RLS helper function not
+checking something it should), just for account status instead of
+ownership scoping.
+
+**WRONG:**
+```sql
+create or replace function public.my_role()
+returns text
+language sql security definer stable
+as $$
+  select role from public.users where id = auth.uid();
+$$;
+```
+
+**CORRECT:**
+```sql
+create or replace function public.my_role()
+returns text
+language sql security definer stable
+as $$
+  select role from public.users where id = auth.uid() and is_active = true;
+$$;
+-- my_branch_id() gets the identical `and is_active = true` addition.
+-- my_owner_id() needs no direct change — it's built entirely out of
+-- these two functions, so it already returns null for a deactivated
+-- caller once they do.
+```
+
+**Known residual gap, deliberately not fixed here:** owner-scoped
+policies (`owner_id = auth.uid()` on `branches`, `tasks`, `task_items`,
+`food_safety_standards`, `schedule_events`, `subscriptions`, and
+`is_my_branch()`) check `auth.uid()` directly, never through
+`my_role()`/`my_branch_id()` — so a deactivated *owner* account (not
+manager) would still bypass RLS via those policies. Left open because
+there's currently no in-app feature to deactivate an owner's own account
+at all (only the owner's own managers, via their "Deactivate" button) —
+recorded here so it isn't rediscovered as new, and so it's fixed properly
+(likely a shared `my_active_uid()` helper replacing every direct
+self-scoping `auth.uid()` reference) if/when an owner-deactivation
+feature is ever built.
+
+**Rule:** Any RLS helper function that scopes access by *who* the caller
+is (`my_role()`, `my_branch_id()`, and equivalents) must also verify the
+caller is still allowed to act at all (`is_active`), not just that their
+JWT is valid — a valid session and a currently-authorized account are two
+different things, and Supabase Auth only guarantees the former. Verified
+live before AND after intent: proved the gap live pre-fix (deactivation
+had zero effect on RLS-gated access with the same token); manual SQL is
+in PENDING_MANUAL_STEPS.md §6.3, not yet applied to the live DB as of
+this writing — re-run the same live-deactivation test once it is, this
+time expecting an empty result instead of the unchanged rows.
+
+---
+
 ## ➕ HOW TO ADD A NEW BUG
 
 When you fix a new bug, add it at the bottom of the relevant severity

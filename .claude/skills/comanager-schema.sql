@@ -356,13 +356,27 @@ for each row execute function public.handle_new_user();
 -- evaluation when policies query public.users for the caller's own role.
 -- ------------------------------------------------------------
 
+-- Fixed 2026-07-30 (audit finding): neither function checked is_active,
+-- so a deactivated user's still-valid Supabase Auth session (deactivation
+-- doesn't revoke the JWT -- Supabase Auth has no idea public.users has an
+-- is_active column at all) kept full RLS-level access to every policy
+-- built on these two functions. Verified live: signed in as a real
+-- manager, deactivated their account via service role mid-session,
+-- retried an identical raw REST call with the exact same still-valid
+-- access token -- it returned the same rows, unchanged, as if nothing
+-- had happened. is_active was previously enforced only by the app's own
+-- client-side usePanelAuth check (bypassable by hitting the REST API
+-- directly, same class of gap as BUG#019/#024). Returning null for a
+-- deactivated user here means every policy using these two functions
+-- automatically stops matching for them -- no other policy needs to
+-- change individually.
 create or replace function public.my_role()
 returns text
 language sql
 security definer
 stable
 as $$
-  select role from public.users where id = auth.uid();
+  select role from public.users where id = auth.uid() and is_active = true;
 $$;
 
 create or replace function public.my_branch_id()
@@ -371,7 +385,7 @@ language sql
 security definer
 stable
 as $$
-  select branch_id from public.users where id = auth.uid();
+  select branch_id from public.users where id = auth.uid() and is_active = true;
 $$;
 
 -- true if the given branch belongs to an owner_id equal to auth.uid()
@@ -394,6 +408,11 @@ $$;
 -- `branch_id is null`, with no ownership check at all, so every owner's
 -- own globally-scoped (branch_id is null) tasks/standards/events leaked to
 -- every OTHER owner's account too.
+--
+-- Needs no direct is_active check of its own (2026-07-30 fix, above) —
+-- it's built entirely out of my_role()/my_branch_id(), both of which now
+-- return null for a deactivated caller, so this already returns null for
+-- them without any change here.
 create or replace function public.my_owner_id()
 returns uuid
 language sql
