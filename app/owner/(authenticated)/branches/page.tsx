@@ -4,13 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import { supabaseOwner } from "@/lib/supabase/client";
 import { usePanelAuth } from "@/lib/auth/use-panel-auth";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
-import {
-  calcPending,
-  calcRate,
-  completionBackgroundColor,
-  completionColor,
-  getExpectedForBranch,
-} from "@/lib/utils/completion";
+import { calcPending, calcRate, completionBackgroundColor, completionColor } from "@/lib/utils/completion";
+import { riyadhDateString } from "@/lib/utils/riyadh-date";
 import { BranchModal, type BranchFormValues } from "./BranchModal";
 
 interface Branch {
@@ -31,7 +26,6 @@ export default function BranchesPage() {
 
   const [branches, setBranches] = useState<Branch[]>([]);
   const [managerCounts, setManagerCounts] = useState<Record<string, number>>({});
-  const [taskDefs, setTaskDefs] = useState<{ id: string; branch_id: string | null }[]>([]);
   const [todaySubs, setTodaySubs] = useState<{ branch_id: string; status: string }[]>([]);
   const [branchesAllowed, setBranchesAllowed] = useState<number | null>(null);
   const [dataLoading, setDataLoading] = useState(true);
@@ -39,15 +33,14 @@ export default function BranchesPage() {
 
   const loadData = useCallback(async () => {
     setDataLoading(true);
-    const today = new Date().toISOString().slice(0, 10);
-    const [{ data: branchData }, { data: managerData }, { data: taskData }, { data: subData }, { data: subscription }] =
+    const today = riyadhDateString();
+    const [{ data: branchData }, { data: managerData }, { data: subData }, { data: subscription }] =
       await Promise.all([
         client
           .from("branches")
           .select("id, name, name_ar, address, address_ar, city, phone, is_active")
           .order("name"),
         client.from("users").select("branch_id").eq("role", "branch_manager").eq("is_active", true),
-        client.from("tasks").select("id, branch_id").eq("is_active", true),
         client.from("task_submissions").select("branch_id, status").eq("due_date", today),
         client.from("subscriptions").select("branches_count").single(),
       ]);
@@ -58,7 +51,6 @@ export default function BranchesPage() {
       if (m.branch_id) counts[m.branch_id] = (counts[m.branch_id] ?? 0) + 1;
     });
     setManagerCounts(counts);
-    setTaskDefs(taskData ?? []);
     setTodaySubs(subData ?? []);
     setBranchesAllowed(subscription?.branches_count ?? null);
     setDataLoading(false);
@@ -76,12 +68,28 @@ export default function BranchesPage() {
     return <main className="p-8 text-sm text-ink/60">Loading...</main>;
   }
 
+  // Denominator is today's actual task_submissions rows for this branch,
+  // not the count of task definitions (audit finding, 2026-07-30): a task
+  // definition can exist with no submission row yet generated for today
+  // (a brand-new task before the next midnight slot-gen run, or — as in
+  // this project until PENDING_MANUAL_STEPS.md §3 is run — every task,
+  // always). Counting definitions as "expected" silently manufactured
+  // phantom "pending" entries for slots that don't exist yet, verified
+  // live: a task with zero submission rows for today inflated the pending
+  // count and deflated the rate, even though the actual submission table
+  // had no pending row at all. Every other page (owner Dashboard, branch-
+  // manager Dashboard/Tasks) already uses actual submission-row counts —
+  // this brings Branches in line with that.
   function branchStats(branchId: string) {
-    const expected = getExpectedForBranch(taskDefs, branchId);
     const subs = todaySubs.filter((s) => s.branch_id === branchId);
     const completed = subs.filter((s) => s.status === "completed").length;
     const missed = subs.filter((s) => s.status === "missed").length;
-    return { completed, missed, pending: calcPending(expected, completed, missed), rate: calcRate(completed, expected) };
+    return {
+      completed,
+      missed,
+      pending: calcPending(subs.length, completed, missed),
+      rate: calcRate(completed, subs.length),
+    };
   }
 
   async function handleCreate(values: BranchFormValues): Promise<string | void> {

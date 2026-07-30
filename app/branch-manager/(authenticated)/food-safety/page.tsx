@@ -6,6 +6,7 @@ import { supabaseBranchManager } from "@/lib/supabase/client";
 import { usePanelAuth } from "@/lib/auth/use-panel-auth";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { uploadPhoto } from "@/lib/cloudinary/upload-photo";
+import { riyadhDateString } from "@/lib/utils/riyadh-date";
 
 interface Standard {
   id: string;
@@ -49,7 +50,7 @@ export default function BranchManagerFoodSafetyPage() {
     }
     setDataLoading(true);
     setLoadError(null);
-    const today = new Date().toISOString().slice(0, 10);
+    const today = riyadhDateString();
 
     const [standardRes, subRes] = await Promise.all([
       client

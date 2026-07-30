@@ -11,6 +11,7 @@ import {
   RANGE_BUCKET,
   type ReportRange,
 } from "@/lib/utils/reports";
+import { parseDueDate, riyadhDateString, riyadhDaysAgoString } from "@/lib/utils/riyadh-date";
 
 interface Branch {
   id: string;
@@ -68,9 +69,8 @@ export default function ReportsPage() {
   const loadData = useCallback(
     async (currentRange: ReportRange) => {
       setDataLoading(true);
-      const since = rangeStartDate(currentRange).toISOString().slice(0, 10);
-      const tenWeeksAgo = new Date();
-      tenWeeksAgo.setDate(tenWeeksAgo.getDate() - 70);
+      const since = rangeStartDate(currentRange);
+      const tenWeeksAgo = riyadhDaysAgoString(70);
 
       const [{ data: branchData }, { data: taskData }, { data: taskSubData }, { data: fsSubData }, { data: heatmapData }] =
         await Promise.all([
@@ -81,7 +81,7 @@ export default function ReportsPage() {
           client
             .from("task_submissions")
             .select("task_id, branch_id, due_date, status")
-            .gte("due_date", tenWeeksAgo.toISOString().slice(0, 10)),
+            .gte("due_date", tenWeeksAgo),
         ]);
 
       setBranches(branchData ?? []);
@@ -109,7 +109,7 @@ export default function ReportsPage() {
   // Completion rate trend
   const completionBuckets = new Map<string, { completed: number; total: number }>();
   scopedTaskSubs.forEach((s) => {
-    const key = bucketKey(new Date(s.due_date), bucket);
+    const key = bucketKey(s.due_date, bucket);
     const b = completionBuckets.get(key) ?? { completed: 0, total: 0 };
     b.total += 1;
     if (s.status === "completed") b.completed += 1;
@@ -124,7 +124,7 @@ export default function ReportsPage() {
   scopedFsSubs
     .filter((s) => s.result !== "pending")
     .forEach((s) => {
-      const key = bucketKey(new Date(s.due_date), bucket);
+      const key = bucketKey(s.due_date, bucket);
       const b = passBuckets.get(key) ?? { pass: 0, total: 0 };
       b.total += 1;
       if (s.result === "pass") b.pass += 1;
@@ -164,12 +164,18 @@ export default function ReportsPage() {
   // Day-of-week heatmap: last 10 weeks, rows = weeks, columns = day-of-week
   const scopedHeatmap = branchFilter ? heatmapSubs.filter((s) => s.branch_id === branchFilter) : heatmapSubs;
   const dayBuckets = new Map<string, { completed: number; total: number }>(); // key: "weekIndex-dow"
-  const today = new Date();
+  // Anchored to Riyadh's current calendar day (UTC midnight of that date),
+  // not the raw current instant — comparing against d (also UTC midnight
+  // of its due_date) keeps every diff a whole number of days, avoiding any
+  // partial-day drift from whatever time of day "now" happens to be.
+  // getUTCDay() (not getDay()) keeps the day-of-week independent of the
+  // viewer's own browser timezone (audit finding, 2026-07-30).
+  const todayUtcMidnight = parseDueDate(riyadhDateString());
   scopedHeatmap.forEach((s) => {
-    const d = new Date(s.due_date);
-    const weeksAgo = Math.floor((today.getTime() - d.getTime()) / (7 * 24 * 60 * 60 * 1000));
+    const d = parseDueDate(s.due_date);
+    const weeksAgo = Math.floor((todayUtcMidnight.getTime() - d.getTime()) / (7 * 24 * 60 * 60 * 1000));
     if (weeksAgo < 0 || weeksAgo >= 10) return;
-    const key = `${9 - weeksAgo}-${d.getDay()}`;
+    const key = `${9 - weeksAgo}-${d.getUTCDay()}`;
     const b = dayBuckets.get(key) ?? { completed: 0, total: 0 };
     b.total += 1;
     if (s.status === "completed") b.completed += 1;

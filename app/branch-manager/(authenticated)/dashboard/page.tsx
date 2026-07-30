@@ -5,6 +5,7 @@ import { supabaseBranchManager } from "@/lib/supabase/client";
 import { usePanelAuth } from "@/lib/auth/use-panel-auth";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { calcRate, completionColor } from "@/lib/utils/completion";
+import { riyadhDateString } from "@/lib/utils/riyadh-date";
 
 interface TaskDef {
   id: string;
@@ -46,7 +47,7 @@ export default function BranchManagerDashboardPage() {
       return;
     }
     setDataLoading(true);
-    const today = new Date().toISOString().slice(0, 10);
+    const today = riyadhDateString();
     const nowIso = new Date().toISOString();
 
     const [taskRes, taskSubRes, fsSubRes, eventRes] = await Promise.all([

@@ -5,6 +5,7 @@ import { supabaseOwner } from "@/lib/supabase/client";
 import { usePanelAuth } from "@/lib/auth/use-panel-auth";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { StandardModal, type StandardFormValues } from "./StandardModal";
+import { riyadhDaysAgoString } from "@/lib/utils/riyadh-date";
 
 interface Standard {
   id: string;
@@ -69,9 +70,7 @@ export default function FoodSafetyPage() {
   const loadData = useCallback(async () => {
     setDataLoading(true);
     setLoadError(null);
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 29);
-    const since = thirtyDaysAgo.toISOString().slice(0, 10);
+    const since = riyadhDaysAgoString(29);
 
     const [branchRes, standardRes, subRes, managerRes] = await Promise.all([
       client.from("branches").select("id, name").eq("is_active", true).order("name"),

@@ -1217,6 +1217,136 @@ bug.
 
 ---
 
+### BUG #029 — Branches Page Used Task-Definition Count Instead of Actual Submission Rows as Its Rate Denominator
+**Severity:** HIGH
+**Area/File:** `app/owner/(authenticated)/branches/page.tsx` — `branchStats()`
+
+**Found during:** a full stats/arithmetic audit across both panels
+(2026-07-30), triggered by a report that the branch-manager Dashboard
+looked stale after fresh submissions (that specific report turned out to
+be an artifact of a corrupted dev-server `.next` cache from an earlier
+turn, not a code bug — but it prompted auditing every displayed number
+against real DB rows rather than just confirming pages render).
+
+**Verified live:** for a branch with 2 real `task_submissions` rows today
+(both completed), the card correctly showed 100% / `2✓ · 0• · 0✗`. Then
+created a 3rd task with **no** `task_submissions` row generated for today
+at all (the realistic case — see PENDING_MANUAL_STEPS.md §3, the slot-gen
+cron isn't scheduled yet, so this is currently true for nearly every task
+in the live DB) — the card immediately dropped to 67% and showed `1•`
+pending, even though the actual `task_submissions` table has **zero**
+pending rows for that branch today. A task definition with no generated
+slot isn't "pending" — it isn't due yet, there's no row for it at all.
+
+**WRONG:**
+```ts
+function branchStats(branchId: string) {
+  // getExpectedForBranch counts active `tasks` rows applicable to this
+  // branch — a task *definition*, not whether today's slot was ever
+  // generated for it.
+  const expected = getExpectedForBranch(taskDefs, branchId);
+  const subs = todaySubs.filter((s) => s.branch_id === branchId);
+  const completed = subs.filter((s) => s.status === "completed").length;
+  const missed = subs.filter((s) => s.status === "missed").length;
+  return { completed, missed, pending: calcPending(expected, completed, missed), rate: calcRate(completed, expected) };
+}
+```
+
+**CORRECT:**
+```ts
+function branchStats(branchId: string) {
+  const subs = todaySubs.filter((s) => s.branch_id === branchId);
+  const completed = subs.filter((s) => s.status === "completed").length;
+  const missed = subs.filter((s) => s.status === "missed").length;
+  return {
+    completed,
+    missed,
+    pending: calcPending(subs.length, completed, missed),
+    rate: calcRate(completed, subs.length),
+  };
+}
+```
+
+**Rule:** A completion rate's denominator must always be the count of
+actual submission rows for the period (`task_submissions` /
+`food_safety_submissions`), never the count of definitions (`tasks` /
+`food_safety_standards`) — the pre-created-slot model (comanager-logic
+§4) means a definition existing is not the same as a slot existing for
+it yet. Every other page in the app already got this right (owner
+Dashboard, branch-manager Dashboard/Tasks) by using actual submission-row
+counts; Branches was the one outlier. Verified live and fixed; no manual
+SQL needed, this was an app-code-only bug.
+
+---
+
+### BUG #030 — Every Page Computed "Today" in UTC/Browser-Local Time Instead of Riyadh Time, Disagreeing With How due_date Is Actually Generated
+**Severity:** HIGH
+**Area/File:** Eight call sites across
+`app/owner/(authenticated)/{dashboard,branches,tasks,food-safety,reports}/page.tsx`
+and `app/branch-manager/(authenticated)/{dashboard,tasks,food-safety}/page.tsx`;
+new shared utility `lib/utils/riyadh-date.ts`; `lib/utils/reports.ts`.
+
+**Found during:** the same 2026-07-30 stats audit, while reading
+`supabase/functions/generate-daily-slots/index.ts` (which computes
+`due_date` as `new Date(nowUtc.getTime() + 3*60*60*1000).toISOString().slice(0,10)`
+— Riyadh's calendar day, UTC+3, no DST) side-by-side with every page
+independently computing `today` as plain
+`new Date().toISOString().slice(0, 10)` — UTC's calendar day. These
+disagree for the ~3 hours daily between UTC 21:00 and 23:59 (Riyadh
+00:00–02:59 the next day), during which that day's slots already exist
+with tomorrow's UTC date, but every page's `today` still shows yesterday's
+UTC date — dashboards would show zero of the current day's already-
+generated tasks/readings for that entire window.
+
+A second, related bug in the Reports page's day-of-week heatmap:
+`new Date(dueDateString)` parses a date-only string as UTC midnight, but
+`.getDay()` reads it back in the **viewer's own browser timezone** — so
+which day-of-week a given `due_date` landed in silently depended on where
+the owner's browser happened to be, not the date itself.
+
+**Not independently live-reproducible for the ~3-hour UTC-boundary case**
+(can't fast-forward the real wall clock) — verified instead by (a)
+confirming the new `riyadhDateString()`/`parseDueDate()` helpers mirror
+the edge function's exact math, and (b) confirming the day-of-week
+heatmap correctly placed a real submission in the Thursday column, most-
+recent-week row, matching 2026-07-30's actual real-world day-of-week
+(computed independently via `getUTCDay()` in Node) — this exercises the
+same UTC-anchored parsing path the fix relies on.
+
+**WRONG:**
+```ts
+const today = new Date().toISOString().slice(0, 10);
+// ...
+const d = new Date(s.due_date);       // parses as UTC midnight
+const dow = d.getDay();               // read back in browser-local time — wrong day for browsers west of UTC
+```
+
+**CORRECT:**
+```ts
+import { riyadhDateString, parseDueDate } from "@/lib/utils/riyadh-date";
+
+const today = riyadhDateString();     // matches generate-daily-slots' own Riyadh-offset math
+const dow = parseDueDate(s.due_date).getUTCDay(); // UTC-anchored parse + UTC getter, browser-independent
+```
+
+**Rule:** `due_date` columns represent a Riyadh (UTC+3) calendar day,
+generated by adding a fixed 3-hour offset to UTC before truncating —
+every client-side "today" or "N days ago" computation must use that exact
+same offset (`lib/utils/riyadh-date.ts`'s `riyadhDateString()` /
+`riyadhDaysAgoString()`), never raw `new Date().toISOString().slice(0,
+10)` or local-calendar `setDate()`/`getDate()` arithmetic. Separately:
+never construct `new Date(dateOnlyString)` and call a *local* getter
+(`getDay()`, `getDate()`, ...) on it — a due_date's identity must not
+depend on the viewer's browser timezone; always parse and read date-only
+strings in UTC (`parseDueDate()` + `getUTCDay()`/etc.). Verified live
+where possible (heatmap placement); the UTC-boundary window itself is
+verified by code inspection and helper-function parity with the edge
+function's own math, not a live wall-clock reproduction — flagged
+explicitly rather than overclaiming a live test that isn't achievable
+here.
+
+---
+
 ## ➕ HOW TO ADD A NEW BUG
 
 When you fix a new bug, add it at the bottom of the relevant severity

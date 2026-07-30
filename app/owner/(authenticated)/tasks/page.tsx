@@ -5,6 +5,7 @@ import { supabaseOwner } from "@/lib/supabase/client";
 import { usePanelAuth } from "@/lib/auth/use-panel-auth";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { calcRate, completionBackgroundColor, completionColor } from "@/lib/utils/completion";
+import { riyadhDateString, riyadhDaysAgoString } from "@/lib/utils/riyadh-date";
 import { TaskModal, type TaskFormValues, type TaskItemFormValues } from "./TaskModal";
 
 interface Task {
@@ -75,9 +76,7 @@ export default function TasksPage() {
 
   const loadData = useCallback(async () => {
     setDataLoading(true);
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
-    const since = sevenDaysAgo.toISOString().slice(0, 10);
+    const since = riyadhDaysAgoString(6);
 
     const [{ data: branchData }, { data: taskData }, { data: itemData }, { data: subData }] = await Promise.all([
       client.from("branches").select("id, name").eq("is_active", true).order("name"),
@@ -111,7 +110,7 @@ export default function TasksPage() {
     return <main className="p-8 text-sm text-ink/60">Loading...</main>;
   }
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = riyadhDateString();
 
   function branchCountForTask(task: Task) {
     return task.branch_id ? 1 : Math.max(branches.length, 1);

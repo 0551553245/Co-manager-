@@ -5,6 +5,7 @@ import { supabaseOwner } from "@/lib/supabase/client";
 import { usePanelAuth } from "@/lib/auth/use-panel-auth";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { calcRate, completionColor } from "@/lib/utils/completion";
+import { parseDueDate, riyadhDateString, riyadhDaysAgoString } from "@/lib/utils/riyadh-date";
 
 interface Branch {
   id: string;
@@ -64,9 +65,7 @@ export default function OwnerDashboardPage() {
 
   const loadData = useCallback(async () => {
     setDataLoading(true);
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
-    const since = sevenDaysAgo.toISOString().slice(0, 10);
+    const since = riyadhDaysAgoString(6);
     const nowIso = new Date().toISOString();
 
     const [branchRes, taskRes, taskSubRes, standardRes, fsSubRes, eventRes, managerRes] = await Promise.all([
@@ -115,7 +114,7 @@ export default function OwnerDashboardPage() {
     return <main className="p-8 text-sm text-ink/60">Loading...</main>;
   }
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = riyadhDateString();
   const todaySubs = taskSubs.filter((s) => s.due_date === today);
   const completedToday = todaySubs.filter((s) => s.status === "completed").length;
   const pendingToday = todaySubs.filter((s) => s.status === "pending").length;
@@ -123,12 +122,10 @@ export default function OwnerDashboardPage() {
   const activeBranches = branches.filter((b) => b.is_active).length;
 
   const dailyProgress = Array.from({ length: 7 }).map((_, i) => {
-    const d = new Date();
-    d.setDate(d.getDate() - (6 - i));
-    const key = d.toISOString().slice(0, 10);
+    const key = riyadhDaysAgoString(6 - i);
     const rows = taskSubs.filter((s) => s.due_date === key);
     const completed = rows.filter((s) => s.status === "completed").length;
-    return { day: DAY_LABELS[d.getDay()], rate: calcRate(completed, rows.length) };
+    return { day: DAY_LABELS[parseDueDate(key).getUTCDay()], rate: calcRate(completed, rows.length) };
   });
 
   const categoryOf = new Map(tasks.map((t) => [t.id, t.category ?? "Uncategorized"]));

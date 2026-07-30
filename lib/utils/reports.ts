@@ -22,27 +22,35 @@ export const RANGE_BUCKET: Record<ReportRange, "day" | "week" | "month"> = {
   "3months": "month",
 };
 
-export function rangeStartDate(range: ReportRange): Date {
-  const d = new Date();
-  d.setDate(d.getDate() - RANGE_WINDOW_DAYS[range]);
-  return d;
+import { parseDueDate, riyadhDaysAgoString } from "./riyadh-date";
+
+// due_date is a Riyadh-calendar-day string (comanager-logic §4) — the
+// range's start boundary must be computed with the same Riyadh-offset
+// math the values themselves use, not raw local-browser-clock arithmetic
+// (audit finding, 2026-07-30; see riyadh-date.ts).
+export function rangeStartDate(range: ReportRange): string {
+  return riyadhDaysAgoString(RANGE_WINDOW_DAYS[range]);
 }
 
-// ISO week key (Sunday-start) for weekly bucketing.
-export function weekKey(date: Date): string {
-  const d = new Date(date);
-  d.setDate(d.getDate() - d.getDay());
+// ISO week key (Sunday-start) for weekly bucketing. Takes a due_date
+// string directly and parses/reads it entirely in UTC (parseDueDate) —
+// never construct `new Date(dueDateString)` and call a *local* getter on
+// it, since that silently depends on the viewer's own browser timezone
+// (audit finding, 2026-07-30; see riyadh-date.ts).
+export function weekKey(dueDate: string): string {
+  const d = parseDueDate(dueDate);
+  d.setUTCDate(d.getUTCDate() - d.getUTCDay());
   return d.toISOString().slice(0, 10);
 }
 
-export function monthKey(date: Date): string {
-  return date.toISOString().slice(0, 7); // YYYY-MM
+export function monthKey(dueDate: string): string {
+  return dueDate.slice(0, 7); // YYYY-MM
 }
 
-export function bucketKey(date: Date, bucket: "day" | "week" | "month"): string {
-  if (bucket === "day") return date.toISOString().slice(0, 10);
-  if (bucket === "week") return weekKey(date);
-  return monthKey(date);
+export function bucketKey(dueDate: string, bucket: "day" | "week" | "month"): string {
+  if (bucket === "day") return dueDate;
+  if (bucket === "week") return weekKey(dueDate);
+  return monthKey(dueDate);
 }
 
 export const DAY_OF_WEEK_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
