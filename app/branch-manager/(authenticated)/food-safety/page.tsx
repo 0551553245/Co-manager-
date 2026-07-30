@@ -2,8 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { supabaseBranchManager } from "@/lib/supabase/client";
-import { usePanelAuth } from "@/lib/auth/use-panel-auth";
+import { usePanelAuthContext } from "@/lib/auth/panel-auth-context";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { uploadPhoto } from "@/lib/cloudinary/upload-photo";
 import { riyadhDateString } from "@/lib/utils/riyadh-date";
@@ -32,11 +31,7 @@ const RESULT_STYLE: Record<Submission["result"], string> = {
 };
 
 export default function BranchManagerFoodSafetyPage() {
-  const { loading, profile, client } = usePanelAuth(
-    supabaseBranchManager,
-    "branch_manager",
-    "/branch-manager/login",
-  );
+  const { loading, profile, client } = usePanelAuthContext();
 
   const [standards, setStandards] = useState<Standard[]>([]);
   const [submissions, setSubmissions] = useState<Submission[]>([]);

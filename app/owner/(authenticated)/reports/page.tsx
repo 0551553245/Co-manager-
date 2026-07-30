@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { supabaseOwner } from "@/lib/supabase/client";
-import { usePanelAuth } from "@/lib/auth/use-panel-auth";
+import { usePanelAuthContext } from "@/lib/auth/panel-auth-context";
 import { calcRate, completionBackgroundColor, completionColor, UNDERPERFORMING_THRESHOLD } from "@/lib/utils/completion";
 import {
   bucketKey,
@@ -54,7 +53,7 @@ function LineChart({ points, color }: { points: { key: string; rate: number }[];
 }
 
 export default function ReportsPage() {
-  const { loading, profile, client } = usePanelAuth(supabaseOwner, "owner", "/owner/login");
+  const { loading, profile, client } = usePanelAuthContext();
 
   const [branches, setBranches] = useState<Branch[]>([]);
   const [tasks, setTasks] = useState<TaskDef[]>([]);

@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { supabaseBranchManager } from "@/lib/supabase/client";
-import { usePanelAuth } from "@/lib/auth/use-panel-auth";
+import { usePanelAuthContext } from "@/lib/auth/panel-auth-context";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { calcRate, completionColor } from "@/lib/utils/completion";
 import { riyadhDateString } from "@/lib/utils/riyadh-date";
@@ -29,11 +28,7 @@ interface EventRow {
 }
 
 export default function BranchManagerDashboardPage() {
-  const { loading, profile, client } = usePanelAuth(
-    supabaseBranchManager,
-    "branch_manager",
-    "/branch-manager/login",
-  );
+  const { loading, profile, client } = usePanelAuthContext();
 
   const [tasks, setTasks] = useState<TaskDef[]>([]);
   const [taskSubs, setTaskSubs] = useState<TaskSub[]>([]);

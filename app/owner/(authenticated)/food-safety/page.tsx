@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { supabaseOwner } from "@/lib/supabase/client";
-import { usePanelAuth } from "@/lib/auth/use-panel-auth";
+import { usePanelAuthContext } from "@/lib/auth/panel-auth-context";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { StandardModal, type StandardFormValues } from "./StandardModal";
 import { riyadhDaysAgoString } from "@/lib/utils/riyadh-date";
@@ -56,7 +55,7 @@ const RESULT_STYLE: Record<Submission["result"], string> = {
 };
 
 export default function FoodSafetyPage() {
-  const { loading, profile, client } = usePanelAuth(supabaseOwner, "owner", "/owner/login");
+  const { loading, profile, client } = usePanelAuthContext();
 
   const [branches, setBranches] = useState<Branch[]>([]);
   const [standards, setStandards] = useState<Standard[]>([]);

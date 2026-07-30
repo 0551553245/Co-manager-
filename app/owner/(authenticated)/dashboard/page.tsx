@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { supabaseOwner } from "@/lib/supabase/client";
-import { usePanelAuth } from "@/lib/auth/use-panel-auth";
+import { usePanelAuthContext } from "@/lib/auth/panel-auth-context";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { calcRate, completionColor } from "@/lib/utils/completion";
 import { parseDueDate, riyadhDateString, riyadhDaysAgoString } from "@/lib/utils/riyadh-date";
@@ -52,7 +51,7 @@ const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 // branches (RLS filters postgres_changes payloads automatically) — any
 // submission anywhere updates this page instantly, no refresh/poll.
 export default function OwnerDashboardPage() {
-  const { loading, profile, client } = usePanelAuth(supabaseOwner, "owner", "/owner/login");
+  const { loading, profile, client } = usePanelAuthContext();
 
   const [branches, setBranches] = useState<Branch[]>([]);
   const [tasks, setTasks] = useState<TaskDef[]>([]);

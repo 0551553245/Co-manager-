@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { supabaseOwner } from "@/lib/supabase/client";
-import { usePanelAuth } from "@/lib/auth/use-panel-auth";
+import { usePanelAuthContext } from "@/lib/auth/panel-auth-context";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { calcPending, calcRate, completionBackgroundColor, completionColor } from "@/lib/utils/completion";
 import { riyadhDateString } from "@/lib/utils/riyadh-date";
@@ -22,7 +21,7 @@ interface Branch {
 type ModalState = { type: "create" } | { type: "edit"; branch: Branch } | null;
 
 export default function BranchesPage() {
-  const { loading, profile, client } = usePanelAuth(supabaseOwner, "owner", "/owner/login");
+  const { loading, profile, client } = usePanelAuthContext();
 
   const [branches, setBranches] = useState<Branch[]>([]);
   const [managerCounts, setManagerCounts] = useState<Record<string, number>>({});

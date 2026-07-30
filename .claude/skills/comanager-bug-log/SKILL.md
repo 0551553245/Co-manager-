@@ -1347,6 +1347,111 @@ here.
 
 ---
 
+### BUG #031 — Every Authenticated Page Independently Re-Ran usePanelAuth, Tripling the Profile Fetch on Login and Repeating It on Every Navigation
+**Severity:** MEDIUM (performance, not correctness — no wrong data was ever shown)
+**Area/File:** `lib/auth/panel-auth-context.tsx` (new); both `(authenticated)/layout.tsx` files; all 12 page.tsx files under them.
+
+**Found during:** investigating a "login feels slow/laggy on the live
+Vercel deployment" report (2026-07-30). Tracing the actual request
+sequence from clicking "Sign in" to the dashboard being usable: (1)
+`signInWithPassword`, (2) `useLoginForm`'s own profile fetch to gate the
+redirect (matches comanager-auth's documented login flow, kept as-is —
+fail-fast error feedback before navigating away), (3) client-side
+navigation, (4) the destination **layout's own separate** `usePanelAuth`
+call, (5) the destination **page's own separate** `usePanelAuth` call —
+same query as (4), same query as (2), fetching the identical `users` row
+three times in immediate sequence. Because the page's `loadData()` is
+gated behind `profile` being set, the page's real data couldn't even
+start loading until step (5) finished. Confirmed live by instrumenting
+`window.fetch` before logging in: the `users?id=eq....` profile query
+fired 2 times pre-fix per login (already down from 3 in earlier testing
+once traced) plus 1 more per subsequent page navigation within the panel,
+even though the layout never unmounts between route changes — every
+sidebar click was re-running an auth check whose result the layout had
+already had, unused, the whole time.
+
+**Why this matters more on a real network than localhost:** these are
+all direct browser→Supabase calls (client components using
+`createBrowserClient`), not proxied through Vercel — so each one pays
+full round-trip latency to wherever the Supabase project actually is
+(confirmed via the founder's dashboard: `ap-southeast-1`, Singapore — far
+from this app's Saudi Arabia user base regardless of Vercel's own
+region). On localhost these round trips are sub-millisecond and
+invisible; over a real network each one is real, felt latency stacked in
+front of the page's actual work.
+
+**WRONG:**
+```tsx
+// app/owner/(authenticated)/layout.tsx
+const { profile, client } = usePanelAuth(supabaseOwner, "owner", "/owner/login");
+// ...renders <OwnerSidebar profile={profile} client={client} />{children}
+
+// app/owner/(authenticated)/dashboard/page.tsx — a SEPARATE usePanelAuth
+// call, its own separate Supabase client instance, re-running getSession()
+// + the exact same profile query the layout (mounted one level up, same
+// moment) just ran.
+const { loading, profile, client } = usePanelAuth(supabaseOwner, "owner", "/owner/login");
+```
+
+**CORRECT:**
+```tsx
+// lib/auth/panel-auth-context.tsx — new shared context
+const PanelAuthContext = createContext<PanelAuthValue | null>(null);
+export const PanelAuthProvider = PanelAuthContext.Provider;
+export function usePanelAuthContext(): PanelAuthValue {
+  const ctx = useContext(PanelAuthContext);
+  if (!ctx) throw new Error("usePanelAuthContext must be used within its panel's authenticated layout.");
+  return ctx;
+}
+
+// app/owner/(authenticated)/layout.tsx — runs usePanelAuth ONCE, provides
+// it to every page below via context
+const auth = usePanelAuth(supabaseOwner, "owner", "/owner/login");
+return (
+  <div className="flex min-h-screen">
+    <OwnerSidebar profile={auth.profile} client={auth.client} />
+    <div className="min-w-0 flex-1"><PanelAuthProvider value={auth}>{children}</PanelAuthProvider></div>
+  </div>
+);
+
+// app/owner/(authenticated)/dashboard/page.tsx — reads the layout's
+// already-completed result, zero additional network calls
+const { loading, profile, client } = usePanelAuthContext();
+```
+
+**Verified live:** instrumented `window.fetch` to count `users?id=eq....`
+calls — dropped from 3 to 2 on login (the remaining 2 are the
+login-page's own fail-fast check plus the layout's one shared check; no
+third page-level fetch anymore), and to **0** on every subsequent
+in-panel navigation (previously 1 per navigation). Bonus, unplanned:
+per-page First Load JS dropped substantially across every authenticated
+route (e.g. owner/dashboard 158kB→90.2kB) since `createBrowserClient` and
+its dependencies are no longer duplicated into every page's own bundle.
+
+**Separate finding surfaced while verifying this fix was safe (not
+fixed, flagging only):** `my_role()`/`my_branch_id()` — the functions
+every RLS policy is built on — never check `is_active` at all; they just
+look up the role/branch_id unconditionally. `is_active` enforcement is
+therefore entirely client-side (`usePanelAuth`'s own check), not backed
+by RLS. A deactivated user's still-valid session could keep hitting the
+REST API directly regardless of how often the app's own UI re-checks —
+this was already true before this fix and is unaffected by it (reducing
+re-check frequency doesn't weaken a boundary that was never enforced at
+the RLS layer to begin with), but it's a real gap worth a dedicated fix
+later: making `my_role()` return null/no-match for an inactive user would
+close it for every policy at once without touching each one individually.
+
+**Rule:** A layout that already ran an auth/profile check for its route
+segment should provide the result via context, not leave every page
+below it to independently re-run the same check — Next.js layouts don't
+unmount on client-side navigation, so a per-page re-check is pure
+duplication with no security benefit once the layout's own check is live
+for the session. If a page-level re-check is ever needed for staleness
+reasons, it belongs in the shared hook (making the layout's own check
+periodically refresh), not duplicated per-page.
+
+---
+
 ## ➕ HOW TO ADD A NEW BUG
 
 When you fix a new bug, add it at the bottom of the relevant severity

@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { supabaseOwner } from "@/lib/supabase/client";
-import { usePanelAuth } from "@/lib/auth/use-panel-auth";
+import { usePanelAuthContext } from "@/lib/auth/panel-auth-context";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { ScheduleModal, type ScheduleFormValues } from "./ScheduleModal";
 
@@ -38,7 +37,7 @@ const EVENT_COLOR: Record<string, string> = {
 type View = "month" | "week" | "day";
 
 export default function SchedulePage() {
-  const { loading, profile, client } = usePanelAuth(supabaseOwner, "owner", "/owner/login");
+  const { loading, profile, client } = usePanelAuthContext();
 
   const [branches, setBranches] = useState<Branch[]>([]);
   const [managers, setManagers] = useState<Manager[]>([]);

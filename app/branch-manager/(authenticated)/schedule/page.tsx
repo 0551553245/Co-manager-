@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { supabaseBranchManager } from "@/lib/supabase/client";
-import { usePanelAuth } from "@/lib/auth/use-panel-auth";
+import { usePanelAuthContext } from "@/lib/auth/panel-auth-context";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 
 interface EventRow {
@@ -23,11 +22,7 @@ const EVENT_COLOR: Record<string, string> = {
 // Read-only — comanager-design-match: "Events set by your owner for this
 // branch," simple chronological list, not a calendar.
 export default function BranchManagerSchedulePage() {
-  const { loading, profile, client } = usePanelAuth(
-    supabaseBranchManager,
-    "branch_manager",
-    "/branch-manager/login",
-  );
+  const { loading, profile, client } = usePanelAuthContext();
 
   const [events, setEvents] = useState<EventRow[]>([]);
   const [dataLoading, setDataLoading] = useState(true);

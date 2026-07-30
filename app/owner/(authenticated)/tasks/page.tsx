@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { supabaseOwner } from "@/lib/supabase/client";
-import { usePanelAuth } from "@/lib/auth/use-panel-auth";
+import { usePanelAuthContext } from "@/lib/auth/panel-auth-context";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { calcRate, completionBackgroundColor, completionColor } from "@/lib/utils/completion";
 import { riyadhDateString, riyadhDaysAgoString } from "@/lib/utils/riyadh-date";
@@ -65,7 +64,7 @@ const STRIP_COLOR: Record<StripState, string> = {
 };
 
 export default function TasksPage() {
-  const { loading, profile, client } = usePanelAuth(supabaseOwner, "owner", "/owner/login");
+  const { loading, profile, client } = usePanelAuthContext();
 
   const [branches, setBranches] = useState<Branch[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);

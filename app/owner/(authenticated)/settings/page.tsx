@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { supabaseOwner } from "@/lib/supabase/client";
-import { usePanelAuth } from "@/lib/auth/use-panel-auth";
+import { usePanelAuthContext } from "@/lib/auth/panel-auth-context";
 
 interface Subscription {
   status: "trialing" | "active" | "cancelled" | "expired";
@@ -17,7 +16,7 @@ const TRIAL_LENGTH_DAYS = 14;
 // Routing per comanager-context: account + subscription both live at
 // /owner/settings — there's no separate /owner/billing route.
 export default function OwnerSettingsPage() {
-  const { loading, profile, client } = usePanelAuth(supabaseOwner, "owner", "/owner/login");
+  const { loading, profile, client } = usePanelAuthContext();
 
   const [subscription, setSubscription] = useState<Subscription | null>(null);
   const [branchCount, setBranchCount] = useState(0);
