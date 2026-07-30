@@ -237,6 +237,16 @@ declare
   allowed_count int;
 begin
   if new.is_active = true then
+    -- Fixed 2026-07-30 (audit finding #3, TOCTOU race): without this,
+    -- two concurrent inserts for the same owner (e.g. two open tabs) can
+    -- both run the count below before either commits, both see the same
+    -- pre-insert count, and both slip through — exceeding the cap by one.
+    -- An advisory lock keyed to the owner serializes concurrent creates;
+    -- it's released automatically at transaction end either way. `1` is
+    -- an arbitrary namespace constant so this never collides with the
+    -- manager-cap lock below, which uses a different one.
+    perform pg_advisory_xact_lock(1, hashtext(new.owner_id::text));
+
     select count(*) into active_count
     from public.branches
     where owner_id = new.owner_id
@@ -275,6 +285,12 @@ declare
   active_count int;
 begin
   if new.role = 'branch_manager' and new.is_active = true and new.branch_id is not null then
+    -- Fixed 2026-07-30 (audit finding #3, TOCTOU race) — same reasoning
+    -- as enforce_branch_cap above, keyed to the branch instead of the
+    -- owner. Namespace `2` (vs. `1` above) so the two caps' locks can
+    -- never collide with each other even if their hashed keys did.
+    perform pg_advisory_xact_lock(2, hashtext(new.branch_id::text));
+
     select count(*) into active_count
     from public.users
     where branch_id = new.branch_id
@@ -492,8 +508,18 @@ create policy "owner reads submissions for own branches"
   on public.task_submissions for select
   using (public.is_my_branch(branch_id));
 
-create policy "manager manages own branch submissions"
-  on public.task_submissions for all
+-- Narrowed 2026-07-30 (audit finding #1): was `for all`, granting INSERT
+-- and DELETE beyond what a manager should ever have — comanager-context's
+-- permission model has managers "execute... only their own assigned
+-- tasks," not destroy submission history. task_submissions rows are
+-- pre-created by the midnight cron/service-role; a manager only ever
+-- needs to read and update the status of an existing one.
+create policy "manager reads own branch submissions"
+  on public.task_submissions for select
+  using (branch_id = public.my_branch_id());
+
+create policy "manager updates own branch submissions"
+  on public.task_submissions for update
   using (branch_id = public.my_branch_id())
   with check (branch_id = public.my_branch_id());
 
@@ -514,8 +540,20 @@ create policy "owner reads own branch task_item_submissions"
     )
   );
 
-create policy "manager manages own branch task_item_submissions"
-  on public.task_item_submissions for all
+-- Narrowed 2026-07-30 (audit finding #1) — same reasoning as
+-- task_submissions above: select + update only, no insert/delete.
+create policy "manager reads own branch task_item_submissions"
+  on public.task_item_submissions for select
+  using (
+    exists (
+      select 1 from public.task_submissions ts
+      where ts.id = task_item_submissions.task_submission_id
+        and ts.branch_id = public.my_branch_id()
+    )
+  );
+
+create policy "manager updates own branch task_item_submissions"
+  on public.task_item_submissions for update
   using (
     exists (
       select 1 from public.task_submissions ts
@@ -559,8 +597,14 @@ create policy "owner reads and acknowledges fs submissions for own branches"
   using (public.is_my_branch(branch_id))
   with check (public.is_my_branch(branch_id));
 
-create policy "manager manages own branch fs submissions"
-  on public.food_safety_submissions for all
+-- Narrowed 2026-07-30 (audit finding #1) — same reasoning as
+-- task_submissions above: select + update only, no insert/delete.
+create policy "manager reads own branch fs submissions"
+  on public.food_safety_submissions for select
+  using (branch_id = public.my_branch_id());
+
+create policy "manager updates own branch fs submissions"
+  on public.food_safety_submissions for update
   using (branch_id = public.my_branch_id())
   with check (branch_id = public.my_branch_id());
 

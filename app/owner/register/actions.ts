@@ -73,8 +73,14 @@ export async function registerOwner(
   if (!restaurantName || !ownerName || !email || !phone) {
     return { error: "Please fill in all required fields." };
   }
-  if (!Number.isInteger(branchCount) || branchCount < 1) {
-    return { error: "Branch count must be at least 1." };
+  // Upper bound added 2026-07-30 (audit finding #4) — registration needs
+  // no card and starts a 14-day trial immediately, so nothing previously
+  // stopped a self-registering owner from setting an arbitrarily large
+  // branches_count and provisioning that many free trial branches. 50 is
+  // a generous ceiling for genuine self-serve signup; a chain that size
+  // should be talking to sales, not filling out this form.
+  if (!Number.isInteger(branchCount) || branchCount < 1 || branchCount > 50) {
+    return { error: "Branch count must be between 1 and 50." };
   }
   if (password.length < 8) {
     return { error: "Password must be at least 8 characters." };
@@ -89,8 +95,18 @@ export async function registerOwner(
   // confirmed by following the actual redirect chain. That's why
   // app/auth/confirm is a Client Component page, not a server route:
   // fragments never reach the server at all.
+  //
+  // NEXT_PUBLIC_SITE_URL (server-controlled) wins if set — audit finding
+  // #5, 2026-07-30: falling straight to request headers (Origin, or
+  // worse, Host/X-Forwarded-Proto) means the confirmation-email URL is
+  // partly built from values the client can influence. Vercel normalizes
+  // Host for the production custom domain, but the app shouldn't rely on
+  // the hosting platform alone for a value that ends up in a security-
+  // sensitive email link. Headers stay as a local-dev-only fallback when
+  // the env var isn't configured.
   const headersList = headers();
   const origin =
+    process.env.NEXT_PUBLIC_SITE_URL ??
     headersList.get("origin") ??
     `${headersList.get("x-forwarded-proto") ?? "http"}://${headersList.get("host")}`;
 

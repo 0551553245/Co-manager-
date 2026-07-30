@@ -496,7 +496,167 @@ before running the `alter publication` above would confirm the diagnosis.
 
 ---
 
-## 5. Not blocking today, but needed before real use
+## 6. Audit fixes #1 and #3 (2026-07-30) — run both, either order
+
+### 6.1 — CRITICAL: narrow manager RLS from `for all` to `select`+`update` (audit finding #1)
+
+**Verified live against the current, unpatched DB (2026-07-30):** signed in
+as a real branch manager and sent a raw `DELETE
+/rest/v1/task_submissions?id=eq.<row>` with nothing but that manager's own
+session token — it succeeded (`200`, row deleted), even though the app UI
+never exposes a delete action anywhere. Root cause: the three `"manager
+manages own branch ..."` policies below are `for all`, so RLS grants
+INSERT and DELETE on top of the SELECT/UPDATE the app actually uses —
+comanager-context's permission model has managers "execute... only their
+own assigned tasks," not create or destroy submission rows (those are
+pre-created by the midnight cron / service-role only). A manager hitting
+the REST API directly today can delete any submission row for their own
+branch, destroying audit trail. (The row deleted during this test was
+restored immediately via service-role insert — no data was lost.)
+
+```sql
+drop policy "manager manages own branch submissions" on public.task_submissions;
+create policy "manager reads own branch submissions"
+  on public.task_submissions for select
+  using (branch_id = public.my_branch_id());
+create policy "manager updates own branch submissions"
+  on public.task_submissions for update
+  using (branch_id = public.my_branch_id())
+  with check (branch_id = public.my_branch_id());
+
+drop policy "manager manages own branch task_item_submissions" on public.task_item_submissions;
+create policy "manager reads own branch task_item_submissions"
+  on public.task_item_submissions for select
+  using (
+    exists (
+      select 1 from public.task_submissions ts
+      where ts.id = task_item_submissions.task_submission_id
+        and ts.branch_id = public.my_branch_id()
+    )
+  );
+create policy "manager updates own branch task_item_submissions"
+  on public.task_item_submissions for update
+  using (
+    exists (
+      select 1 from public.task_submissions ts
+      where ts.id = task_item_submissions.task_submission_id
+        and ts.branch_id = public.my_branch_id()
+    )
+  )
+  with check (
+    exists (
+      select 1 from public.task_submissions ts
+      where ts.id = task_item_submissions.task_submission_id
+        and ts.branch_id = public.my_branch_id()
+    )
+  );
+
+drop policy "manager manages own branch fs submissions" on public.food_safety_submissions;
+create policy "manager reads own branch fs submissions"
+  on public.food_safety_submissions for select
+  using (branch_id = public.my_branch_id());
+create policy "manager updates own branch fs submissions"
+  on public.food_safety_submissions for update
+  using (branch_id = public.my_branch_id())
+  with check (branch_id = public.my_branch_id());
+```
+
+**Not yet run.** After running, re-verify with the same raw-REST DELETE
+test as a signed-in branch manager against any of the three tables — it
+should now come back `403`/empty instead of `200`. The app itself needs no
+code change: it never called INSERT or DELETE on these tables from the
+manager side to begin with (confirmed by reading
+`app/branch-manager/(authenticated)/tasks/page.tsx` and the food-safety
+equivalent — both only ever `.update()` an existing pre-created row).
+
+### 6.2 — Cap-enforcement TOCTOU race (audit finding #3)
+
+**Not live-testable from this environment.** Reliably forcing two requests
+to race inside the same Postgres transaction window isn't something a
+script firing concurrent HTTP requests can guarantee (network/processing
+jitter means they usually end up serialized anyway, which would look like
+a "pass" whether or not the underlying gap exists) — so this is a
+by-inspection fix, not one with live before/after proof like 6.1 got.
+`enforce_branch_cap` and `enforce_manager_cap` both count existing active
+rows and compare against the cap with no locking, so two concurrent
+inserts (e.g. two open tabs creating a branch/manager at the same time)
+can both read the same pre-insert count and both slip through, exceeding
+the cap by one. `pg_advisory_xact_lock` serializes concurrent inserts for
+the same owner/branch and auto-releases at transaction end either way —
+correctly closes the gap even on a first-ever insert (unlike `select ...
+for update`, which only locks rows that already exist, so it can't help
+when the cap is being hit from zero).
+
+```sql
+create or replace function public.enforce_branch_cap()
+returns trigger
+language plpgsql
+security definer
+as $$
+declare
+  active_count int;
+  allowed_count int;
+begin
+  if new.is_active = true then
+    perform pg_advisory_xact_lock(1, hashtext(new.owner_id::text));
+
+    select count(*) into active_count
+    from public.branches
+    where owner_id = new.owner_id
+      and is_active = true
+      and id <> new.id;
+
+    select branches_count into allowed_count
+    from public.subscriptions
+    where owner_id = new.owner_id;
+
+    if allowed_count is not null and active_count >= allowed_count then
+      raise exception 'Branch limit reached for this subscription (% of % branches used)', active_count, allowed_count;
+    end if;
+  end if;
+  return new;
+end;
+$$;
+```
+
+```sql
+create or replace function public.enforce_manager_cap()
+returns trigger
+language plpgsql
+security definer
+as $$
+declare
+  active_count int;
+begin
+  if new.role = 'branch_manager' and new.is_active = true and new.branch_id is not null then
+    perform pg_advisory_xact_lock(2, hashtext(new.branch_id::text));
+
+    select count(*) into active_count
+    from public.users
+    where branch_id = new.branch_id
+      and role = 'branch_manager'
+      and is_active = true
+      and id <> new.id;
+
+    if active_count >= 2 then
+      raise exception 'Manager limit reached for this branch (max 2 active managers)';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+```
+
+Both use `create or replace function` — the existing `create trigger`
+statements already reference these functions by name, so no trigger needs
+to be dropped or recreated, just re-running these two blocks updates the
+logic the triggers call.
+
+**Not yet run.**
+
+---
+
+## 7. Not blocking today, but needed before real use
 
 - **Cloudinary credentials.** `requires_photo` is currently stubbed
   everywhere (Branch Manager Tasks and Food Safety submission forms) — the

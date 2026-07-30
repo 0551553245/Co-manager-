@@ -84,8 +84,9 @@ export function RegisterForm() {
           type="number"
           name="branchCount"
           min={1}
+          max={50}
           value={branchCount}
-          onChange={(e) => setBranchCount(Math.max(1, Number(e.target.value) || 1))}
+          onChange={(e) => setBranchCount(Math.min(50, Math.max(1, Number(e.target.value) || 1)))}
           required
           className="rounded border p-2"
         />

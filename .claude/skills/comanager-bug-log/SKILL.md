@@ -941,6 +941,282 @@ writing.**
 
 ---
 
+### BUG #024 — Manager RLS Policies Granted INSERT/DELETE via `for all`
+**Severity:** CRITICAL
+**Area/File:** `comanager-schema.sql` — `"manager manages own branch submissions"` / `"...task_item_submissions"` / `"...fs submissions"` policies
+
+**Found during:** full end-to-end code-quality audit (2026-07-30),
+cross-checking RLS policies against comanager-context's actual permission
+model ("managers execute... only their own assigned tasks") rather than
+just confirming a policy exists.
+
+**Verified live against the unpatched DB:** signed in as a real branch
+manager and sent a raw `DELETE /rest/v1/task_submissions?id=eq.<row>`
+using nothing but that manager's own session token (no app UI involved
+at all) — it succeeded with `200` and the row was actually deleted. The
+row was restored immediately via a service-role insert.
+
+**The problem:** three manager-facing RLS policies were declared `for
+all` instead of the narrower commands the app actually performs:
+
+**WRONG:**
+```sql
+create policy "manager manages own branch submissions"
+  on public.task_submissions for all
+  using (branch_id = public.my_branch_id())
+  with check (branch_id = public.my_branch_id());
+```
+
+`for all` covers SELECT, INSERT, UPDATE, and DELETE — but
+`task_submissions`/`task_item_submissions`/`food_safety_submissions` rows
+are all pre-created by the midnight cron / service-role (comanager-logic
+§4's pre-created-slot model). A manager only ever needs to read an
+existing row and flip its status/note/value/photo — the app code never
+calls `.insert()` or `.delete()` on any of these three tables from the
+manager side. The `for all` policy granted capability the app never uses
+but a raw REST call absolutely can, letting a manager permanently destroy
+their own branch's submission history.
+
+**CORRECT:**
+```sql
+create policy "manager reads own branch submissions"
+  on public.task_submissions for select
+  using (branch_id = public.my_branch_id());
+create policy "manager updates own branch submissions"
+  on public.task_submissions for update
+  using (branch_id = public.my_branch_id())
+  with check (branch_id = public.my_branch_id());
+```
+(same split applied to `task_item_submissions` and
+`food_safety_submissions` — see PENDING_MANUAL_STEPS.md §6.1 for the full
+`drop`/`create` SQL for all three tables.)
+
+**Rule:** An RLS policy's command list (`for all` vs. `for select` /
+`for insert` / `for update` / `for delete`) must match the *narrowest* set
+of operations the role actually performs through the app, not just
+"whatever's convenient to write once" — `for all` is a scope decision, and
+defaulting to it silently grants capability nothing in the app exercises
+but anything hitting the REST API directly can. Multiple PERMISSIVE
+policies on the same table OR together (same underlying mechanism as
+BUG#019), so a narrow-looking policy elsewhere doesn't offset one `for
+all` policy granting more than intended. **Manual SQL to apply this fix is
+in PENDING_MANUAL_STEPS.md §6.1 — not yet applied to the live DB as of
+this writing.**
+
+---
+
+### BUG #025 — Cap-Enforcement Triggers Vulnerable to TOCTOU Race Under Concurrent Inserts
+**Severity:** HIGH
+**Area/File:** `comanager-schema.sql` — `enforce_branch_cap()`, `enforce_manager_cap()`
+
+**Found during:** the same 2026-07-30 audit, reasoning through
+`enforce_branch_cap`/`enforce_manager_cap` for concurrent-request edge
+cases rather than just single-request correctness (which was already
+fine, per BUG#015's earlier, separate finding about exception-swallowing).
+
+**The problem:** both triggers `select count(*)` against the current
+active rows, compare to the cap, and only then allow the insert — with no
+locking between the count and the insert. Two near-simultaneous inserts
+for the same owner (branch cap) or branch (manager cap) — e.g. two open
+tabs both clicking "Add branch"/"Add manager" at once — can both run
+their `count(*)` before either commits, both see the same pre-insert
+count, and both pass the `if` check even when only one more should be
+allowed. Not live-testable from this environment: reliably forcing two
+requests to land inside the same transaction window isn't something a
+script firing concurrent HTTP requests can guarantee (network/processing
+jitter usually serializes them anyway), so this is a by-inspection fix,
+unlike BUG#024's live-reproduced gap.
+
+**WRONG:**
+```sql
+if new.is_active = true then
+  select count(*) into active_count from public.branches
+  where owner_id = new.owner_id and is_active = true and id <> new.id;
+  -- no lock here — a second concurrent insert can read the same count
+  select branches_count into allowed_count from public.subscriptions
+  where owner_id = new.owner_id;
+  if allowed_count is not null and active_count >= allowed_count then
+    raise exception '...';
+  end if;
+end if;
+```
+
+**CORRECT:**
+```sql
+if new.is_active = true then
+  -- Serializes concurrent inserts for the same owner; auto-released at
+  -- transaction end either way. Works even from zero existing rows,
+  -- unlike `select ... for update` (which only locks rows that already
+  -- exist and can't prevent a race on the very first insert).
+  perform pg_advisory_xact_lock(1, hashtext(new.owner_id::text));
+  select count(*) into active_count from public.branches
+  where owner_id = new.owner_id and is_active = true and id <> new.id;
+  select branches_count into allowed_count from public.subscriptions
+  where owner_id = new.owner_id;
+  if allowed_count is not null and active_count >= allowed_count then
+    raise exception '...';
+  end if;
+end if;
+```
+(`enforce_manager_cap` gets the same treatment, keyed to `new.branch_id`
+with namespace constant `2` instead of `1`, so the two caps' advisory
+locks can never collide with each other even in the unlikely event of a
+`hashtext()` collision.)
+
+**Rule:** Any count-then-compare cap-enforcement trigger needs
+`pg_advisory_xact_lock(namespace, hashtext(scoping_id::text))` — keyed to
+whatever the cap is scoped by (owner, branch, etc.) — taken *before* the
+count, not just a `select ... for update` on existing rows (which can't
+help when the race is about whether a *new* row should be allowed to
+exist at all). Use a distinct namespace constant per cap category so
+locks for different caps never contend with each other. **Manual SQL to
+apply this fix is in PENDING_MANUAL_STEPS.md §6.2 — not yet applied to the
+live DB as of this writing.**
+
+---
+
+### BUG #026 — Checklist Rollup Cross-Referenced Active Items Instead of This Cycle's Actual Submissions
+**Severity:** MEDIUM
+**Area/File:** `app/branch-manager/(authenticated)/tasks/page.tsx` — `checkAndRollupParent`
+
+**Found during:** the same 2026-07-30 audit, tracing what happens when an
+owner deactivates a `task_items` row mid-cycle, after that cycle's
+`task_item_submissions` rows were already pre-created (comanager-logic
+§4's "edits apply going forward only" rule covers *new* items appearing
+tomorrow, but says nothing about an item disappearing from an
+already-generated cycle).
+
+**Verified live:** created a task with two items, let the day's slots
+generate, deactivated one item, then completed the *other* (still-active)
+item as a branch manager. The parent `task_submissions` row rolled up to
+`completed` even though the deactivated item's own `task_item_submissions`
+row was still sitting at `pending` — that submission became permanently
+unreachable (no UI shows a deactivated item, so nothing could ever
+complete it), yet the parent claimed the task was fully done.
+
+**WRONG:**
+```ts
+async function checkAndRollupParent(taskSubmissionId: string, taskId: string, submittedBy: string) {
+  // `items` was fetched with `.eq("is_active", true)` in loadData — a
+  // deactivated item silently drops out of this list, so its still-
+  // pending submission is never checked at all.
+  const taskItems = items.filter((i) => i.task_id === taskId);
+  const allDone = taskItems.every((i) =>
+    itemSubs.find((s) => s.task_submission_id === taskSubmissionId && s.item_id === i.id)?.status === "completed"
+  );
+  if (allDone) { /* roll up */ }
+}
+```
+
+**CORRECT:**
+```ts
+async function checkAndRollupParent(taskSubmissionId: string, submittedBy: string) {
+  // Check against this cycle's actual task_item_submissions rows, not
+  // the currently-active task_items list — a deactivated item still has
+  // a real, still-pending row for this cycle and must block rollup.
+  const { data: freshItemSubs } = await client
+    .from("task_item_submissions")
+    .select("status")
+    .eq("task_submission_id", taskSubmissionId);
+  const allDone = !!freshItemSubs?.length && freshItemSubs.every((s) => s.status === "completed");
+  if (allDone) { /* roll up */ }
+}
+```
+
+**Rule:** A cycle's completion check must be driven by the submission
+rows that actually exist for that cycle (`task_item_submissions` /
+`food_safety_submissions`), never by cross-referencing against the
+currently-active definition list (`task_items` / standards) — those two
+can diverge the moment something is deactivated mid-cycle, and the
+pre-created-slot model (comanager-logic §4) means the submission rows are
+the source of truth for "what this cycle actually requires," not
+whatever happens to be active right now. Verified live and fixed; no
+manual SQL needed, this was an app-code-only bug.
+
+---
+
+### BUG #027 — Owner Registration Had No Upper Bound on branchCount
+**Severity:** MEDIUM
+**Area/File:** `app/owner/register/actions.ts`, `app/owner/register/RegisterForm.tsx`
+
+**Found during:** the same 2026-07-30 audit, checking `registerOwner`'s
+validation against what a self-registering, no-card-required signup
+(comanager-logic §1) should actually allow.
+
+**Verified live:** bypassed the client-side input via
+`Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,
+'value').set.call(input, 999)` (simulating a raw POST that skips the UI
+entirely) and removed the native `max` attribute so the browser wouldn't
+silently block the submission before it reached the server — confirmed
+the *server* rejected it once the fix below was in place, with the exact
+message "Branch count must be between 1 and 50."
+
+**WRONG:**
+```ts
+const branchCount = Number(formData.get("branchCount"));
+// no upper bound — a self-registering owner (no card, 14-day trial
+// starts immediately per comanager-logic §1) could set branches_count to
+// any number and provision that many free trial branches.
+```
+
+**CORRECT:**
+```ts
+if (!Number.isInteger(branchCount) || branchCount < 1 || branchCount > 50) {
+  return { error: "Branch count must be between 1 and 50." };
+}
+```
+
+**Rule:** Any numeric field that flows into a billed/provisioned quantity
+(`subscriptions.branches_count` here) needs an explicit upper bound
+checked server-side, not just a client-side `max` attribute (which a raw
+POST bypasses entirely) — a free-trial, no-card signup flow is exactly
+the case where an unbounded quantity field is cheapest to abuse. Verified
+live and fixed; no manual SQL needed, this was an app-code-only bug.
+
+---
+
+### BUG #028 — Confirmation-Email Origin Built From Client-Influenceable Request Headers
+**Severity:** LOW
+**Area/File:** `app/owner/register/actions.ts`
+
+**Found during:** the same 2026-07-30 audit, tracing where the
+`emailRedirectTo` URL passed to `signUp()` (see BUG#017) actually comes
+from.
+
+**Verified live:** temporarily set `NEXT_PUBLIC_SITE_URL` in `.env.local`
+to a distinct marker value, confirmed via server-side logging that it won
+over the request's `Origin`/`Host` headers, then removed the temporary env
+var and log line, restoring both files to their prior state.
+
+**WRONG:**
+```ts
+const headersList = headers();
+const origin = headersList.get("origin")
+  ?? `${headersList.get("x-forwarded-proto") ?? "http"}://${headersList.get("host")}`;
+// falls straight to request headers a client can influence — Vercel
+// normalizes Host for the production custom domain, but the app
+// shouldn't rely on the hosting platform alone for a value that ends up
+// in a security-sensitive email link.
+```
+
+**CORRECT:**
+```ts
+const origin =
+  process.env.NEXT_PUBLIC_SITE_URL ??
+  headersList.get("origin") ??
+  `${headersList.get("x-forwarded-proto") ?? "http"}://${headersList.get("host")}`;
+```
+
+**Rule:** Any URL used in a security-sensitive context (email
+confirmation links, redirect targets) should prefer a server-controlled
+env var over request headers when one is configured, keeping headers as a
+local-dev-only fallback. `NEXT_PUBLIC_SITE_URL` is documented in
+`.env.local.example`; recommended in production, optional locally.
+Verified live and fixed; no manual SQL needed, this was an app-code-only
+bug.
+
+---
+
 ## ➕ HOW TO ADD A NEW BUG
 
 When you fix a new bug, add it at the bottom of the relevant severity

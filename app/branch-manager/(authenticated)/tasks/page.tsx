@@ -115,15 +115,20 @@ export default function BranchManagerTasksPage() {
   // parent row up to 'completed' too (comanager-logic §4). Client-side is
   // safe here: at most 2 managers per branch, and setting status to the
   // same value twice is harmless.
-  async function checkAndRollupParent(taskSubmissionId: string, taskId: string, submittedBy: string) {
-    const taskItemIds = items.filter((i) => i.task_id === taskId).map((i) => i.id);
+  //
+  // Checks against the task_item_submissions rows actually tied to this
+  // cycle, not the currently-active task_items list (audit finding #2,
+  // 2026-07-30): if an owner deactivates an item mid-cycle after its slot
+  // was already pre-created, that item drops out of `items` (fetched with
+  // is_active=true) but its task_item_submissions row still exists and is
+  // still 'pending' — cross-referencing against the active-only item list
+  // would silently ignore it and roll the parent up to 'completed' anyway.
+  async function checkAndRollupParent(taskSubmissionId: string, submittedBy: string) {
     const { data: freshItemSubs } = await client
       .from("task_item_submissions")
-      .select("item_id, status")
+      .select("status")
       .eq("task_submission_id", taskSubmissionId);
-    const allDone = taskItemIds.every(
-      (id) => freshItemSubs?.find((s) => s.item_id === id)?.status === "completed",
-    );
+    const allDone = !!freshItemSubs?.length && freshItemSubs.every((s) => s.status === "completed");
     if (allDone) {
       await client
         .from("task_submissions")
@@ -183,7 +188,7 @@ export default function BranchManagerTasksPage() {
                               client={client}
                               submittedBy={profile.id}
                               onSubmitted={async () => {
-                                await checkAndRollupParent(sub.id, task.id, profile.id);
+                                await checkAndRollupParent(sub.id, profile.id);
                                 await loadData();
                               }}
                             />
