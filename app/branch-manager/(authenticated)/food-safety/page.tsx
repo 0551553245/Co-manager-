@@ -5,6 +5,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { supabaseBranchManager } from "@/lib/supabase/client";
 import { usePanelAuth } from "@/lib/auth/use-panel-auth";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
+import { uploadPhoto } from "@/lib/cloudinary/upload-photo";
 
 interface Standard {
   id: string;
@@ -20,6 +21,7 @@ interface Submission {
   result: "pending" | "pass" | "fail";
   actual_value: number | null;
   corrective_note: string | null;
+  photo_url: string | null;
 }
 
 const RESULT_STYLE: Record<Submission["result"], string> = {
@@ -57,7 +59,7 @@ export default function BranchManagerFoodSafetyPage() {
         .eq("is_active", true),
       client
         .from("food_safety_submissions")
-        .select("id, standard_id, result, actual_value, corrective_note")
+        .select("id, standard_id, result, actual_value, corrective_note, photo_url")
         .eq("branch_id", profile.branch_id)
         .eq("due_date", today),
     ]);
@@ -140,14 +142,14 @@ function ReadingCard({
 }) {
   const [value, setValue] = useState("");
   const [note, setNote] = useState("");
-  const [hasPhoto, setHasPhoto] = useState(false);
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   async function handleSubmit() {
     setError(null);
     if (value === "") return setError("A reading is required.");
-    if (standard.requires_photo && !hasPhoto) return setError("A photo is required for this reading.");
+    if (standard.requires_photo && !photoFile) return setError("A photo is required for this reading.");
     if (standard.requires_note && !note.trim()) return setError("A note is required for this reading.");
 
     const numeric = Number(value);
@@ -162,6 +164,22 @@ function ReadingCard({
         : "pass";
 
     setSubmitting(true);
+
+    // comanager-context: photo evidence goes to Cloudinary, only the
+    // resulting URL is ever stored in Supabase.
+    let photoUrl: string | null = null;
+    if (standard.requires_photo && photoFile) {
+      const formData = new FormData();
+      formData.append("file", photoFile);
+      const uploadResult = await uploadPhoto(formData);
+      if (uploadResult.error || !uploadResult.url) {
+        setSubmitting(false);
+        setError(uploadResult.error ?? "Photo upload failed. Please try again.");
+        return;
+      }
+      photoUrl = uploadResult.url;
+    }
+
     const { error: updateError } = await client
       .from("food_safety_submissions")
       .update({
@@ -170,8 +188,7 @@ function ReadingCard({
         submitted_by: submittedBy,
         corrective_note: standard.requires_note ? note : null,
         submitted_at: new Date().toISOString(),
-        // photo_url intentionally left null — no Cloudinary credentials
-        // configured yet, stubbed per explicit decision.
+        photo_url: photoUrl,
       })
       .eq("id", submission.id);
     setSubmitting(false);
@@ -191,6 +208,11 @@ function ReadingCard({
           <span className="font-mono text-xs uppercase">{submission.result}</span>
         </div>
         <p className="mt-1 font-mono text-sm">{submission.actual_value}</p>
+        {submission.photo_url && (
+          <a href={submission.photo_url} target="_blank" rel="noreferrer" className="mt-1 inline-block text-xs underline">
+            View photo
+          </a>
+        )}
       </div>
     );
   }
@@ -212,8 +234,12 @@ function ReadingCard({
         />
         {standard.requires_photo && (
           <label className="flex flex-col gap-1 text-xs">
-            Photo (required) — upload not connected yet
-            <input type="file" accept="image/*" onChange={(e) => setHasPhoto(!!e.target.files?.length)} />
+            Photo (required)
+            <input
+              type="file"
+              accept="image/*"
+              onChange={(e) => setPhotoFile(e.target.files?.[0] ?? null)}
+            />
           </label>
         )}
         {standard.requires_note && (

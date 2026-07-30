@@ -5,6 +5,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { supabaseBranchManager } from "@/lib/supabase/client";
 import { usePanelAuth } from "@/lib/auth/use-panel-auth";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
+import { uploadPhoto } from "@/lib/cloudinary/upload-photo";
 
 interface TaskDef {
   id: string;
@@ -191,8 +192,15 @@ export default function BranchManagerTasksPage() {
                               <span className="uppercase">{itemSub.status}</span>
                               {itemSub.note && <p>Note: {itemSub.note}</p>}
                               {itemSub.value_entered !== null && <p>Value: {itemSub.value_entered}</p>}
-                              {item.requires_photo && (
-                                <p className="italic">Photo evidence not available (upload not configured yet).</p>
+                              {itemSub.photo_url && (
+                                <a
+                                  href={itemSub.photo_url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="mt-1 inline-block underline"
+                                >
+                                  View photo
+                                </a>
                               )}
                             </div>
                           )}
@@ -221,7 +229,7 @@ interface TaskItemSubmissionFormProps {
 function TaskItemSubmissionForm({ item, itemSubmission, client, submittedBy, onSubmitted }: TaskItemSubmissionFormProps) {
   const [note, setNote] = useState("");
   const [value, setValue] = useState("");
-  const [hasPhoto, setHasPhoto] = useState(false);
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -229,11 +237,27 @@ function TaskItemSubmissionForm({ item, itemSubmission, client, submittedBy, onS
     setError(null);
     // comanager-conventions: validate requires_photo/requires_note/requires_value
     // against what was actually provided, reject client-side before persisting.
-    if (item.requires_photo && !hasPhoto) return setError("A photo is required for this item.");
+    if (item.requires_photo && !photoFile) return setError("A photo is required for this item.");
     if (item.requires_note && !note.trim()) return setError("A note is required for this item.");
     if (item.requires_value && value === "") return setError("A value is required for this item.");
 
     setSubmitting(true);
+
+    // comanager-context: photo evidence goes to Cloudinary, only the
+    // resulting URL is ever stored in Supabase.
+    let photoUrl: string | null = null;
+    if (item.requires_photo && photoFile) {
+      const formData = new FormData();
+      formData.append("file", photoFile);
+      const uploadResult = await uploadPhoto(formData);
+      if (uploadResult.error || !uploadResult.url) {
+        setSubmitting(false);
+        setError(uploadResult.error ?? "Photo upload failed. Please try again.");
+        return;
+      }
+      photoUrl = uploadResult.url;
+    }
+
     const { error: updateError } = await client
       .from("task_item_submissions")
       .update({
@@ -242,9 +266,7 @@ function TaskItemSubmissionForm({ item, itemSubmission, client, submittedBy, onS
         submitted_at: new Date().toISOString(),
         note: item.requires_note ? note : null,
         value_entered: item.requires_value ? Number(value) : null,
-        // photo_url intentionally left null — no Cloudinary credentials
-        // configured yet (flagged explicitly, decided to stub this rather
-        // than fabricate a fake URL or block the whole feature on it).
+        photo_url: photoUrl,
       })
       .eq("id", itemSubmission.id);
     setSubmitting(false);
@@ -261,8 +283,12 @@ function TaskItemSubmissionForm({ item, itemSubmission, client, submittedBy, onS
       {error && <p className="rounded bg-red/16 p-2 text-sm text-red-ink">{error}</p>}
       {item.requires_photo && (
         <label className="flex flex-col gap-1 text-xs">
-          Photo (required) — upload not connected yet, this only marks the requirement met
-          <input type="file" accept="image/*" onChange={(e) => setHasPhoto(!!e.target.files?.length)} />
+          Photo (required)
+          <input
+            type="file"
+            accept="image/*"
+            onChange={(e) => setPhotoFile(e.target.files?.[0] ?? null)}
+          />
         </label>
       )}
       {item.requires_note && (
