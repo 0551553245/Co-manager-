@@ -1,6 +1,7 @@
 "use server";
 
 import { createHash } from "crypto";
+import { supabaseBranchManagerServer } from "@/lib/supabase/server";
 
 // comanager-context: "Photo evidence → Cloudinary, only the URL is stored
 // in Supabase." This is the only place CLOUDINARY_API_SECRET is read —
@@ -11,6 +12,14 @@ export interface UploadPhotoResult {
   url?: string;
   error?: string;
 }
+
+// Deliberately narrow: real camera/gallery photos only. Explicitly
+// excludes image/svg+xml — an SVG can carry an embedded <script>, and the
+// "View photo" link is a full document navigation (target="_blank"), not
+// an <img> reference, so a browser would execute a script embedded in one
+// if it were ever allowed through.
+const ALLOWED_PHOTO_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/heic"]);
+const MAX_PHOTO_BYTES = 8 * 1024 * 1024; // 8MB — under the 10mb Server Action body cap
 
 interface CloudinaryCredentials {
   cloudName: string;
@@ -43,9 +52,35 @@ function getCloudinaryCredentials(): CloudinaryCredentials | null {
 }
 
 export async function uploadPhoto(formData: FormData): Promise<UploadPhotoResult> {
+  // A Server Action is a directly callable endpoint the moment its action
+  // ID is known — nothing about the client-side login gate on
+  // /branch-manager/tasks protects it. Re-check session + role + is_active
+  // here ourselves, the same three things usePanelAuth checks client-side
+  // (comanager-auth), since this is the actual trust boundary for anyone
+  // who reaches this action directly rather than through the page.
+  const branchManager = supabaseBranchManagerServer();
+  const { data: sessionData } = await branchManager.auth.getSession();
+  if (!sessionData.session) {
+    return { error: "You must be signed in to upload a photo." };
+  }
+  const { data: profile } = await branchManager
+    .from("users")
+    .select("role, is_active")
+    .eq("id", sessionData.session.user.id)
+    .single();
+  if (!profile || profile.role !== "branch_manager" || !profile.is_active) {
+    return { error: "You must be signed in to upload a photo." };
+  }
+
   const file = formData.get("file");
   if (!(file instanceof File)) {
     return { error: "No photo file provided." };
+  }
+  if (!ALLOWED_PHOTO_TYPES.has(file.type)) {
+    return { error: "Only JPEG, PNG, WEBP, or HEIC photos are allowed." };
+  }
+  if (file.size > MAX_PHOTO_BYTES) {
+    return { error: "Photo is too large — please use one under 8MB." };
   }
 
   const creds = getCloudinaryCredentials();
