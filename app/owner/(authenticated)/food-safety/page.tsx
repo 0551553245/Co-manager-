@@ -5,6 +5,7 @@ import { usePanelAuthContext } from "@/lib/auth/panel-auth-context";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { StandardModal, type StandardFormValues } from "./StandardModal";
 import { riyadhDaysAgoString } from "@/lib/utils/riyadh-date";
+import { generateImmediateStandardSlot } from "@/lib/slots/generate-immediate-slot";
 
 interface Standard {
   id: string;
@@ -138,22 +139,32 @@ export default function FoodSafetyPage() {
 
   async function handleCreate(values: StandardFormValues): Promise<string | void> {
     if (!values.title.trim()) return "Title is required.";
-    const { error } = await client.from("food_safety_standards").insert({
-      owner_id: profile!.id,
-      created_by: profile!.id,
-      branch_id: values.branchId || null,
-      title: values.title,
-      title_ar: values.title_ar || null,
-      description: values.description || null,
-      description_ar: values.description_ar || null,
-      check_frequency: values.check_frequency,
-      temperature_min: values.temperatureMin ? Number(values.temperatureMin) : null,
-      temperature_max: values.temperatureMax ? Number(values.temperatureMax) : null,
-      requires_photo: values.requiresPhoto,
-      requires_note: values.requiresNote,
-      is_active: true,
-    });
+    const { data, error } = await client
+      .from("food_safety_standards")
+      .insert({
+        owner_id: profile!.id,
+        created_by: profile!.id,
+        branch_id: values.branchId || null,
+        title: values.title,
+        title_ar: values.title_ar || null,
+        description: values.description || null,
+        description_ar: values.description_ar || null,
+        check_frequency: values.check_frequency,
+        temperature_min: values.temperatureMin ? Number(values.temperatureMin) : null,
+        temperature_max: values.temperatureMax ? Number(values.temperatureMax) : null,
+        requires_photo: values.requiresPhoto,
+        requires_note: values.requiresNote,
+        is_active: true,
+      })
+      .select("id")
+      .single();
     if (error) return error.message;
+
+    // Immediate same-day slot, on top of the nightly cron's own regular
+    // generation — see lib/slots/generate-immediate-slot.ts. Fire-and-forget:
+    // never blocks the create flow if this fails for any reason.
+    void generateImmediateStandardSlot(data.id);
+
     setModal(null);
     await loadData();
   }
@@ -181,10 +192,15 @@ export default function FoodSafetyPage() {
   }
 
   async function toggleActive(standard: Standard) {
+    const reactivating = !standard.is_active;
     await client
       .from("food_safety_standards")
       .update({ is_active: !standard.is_active })
       .eq("id", standard.id);
+    // Reactivating (not deactivating) needs the same immediate same-day
+    // slot as a brand-new standard — a manager shouldn't have to wait
+    // until tomorrow's cron for one the owner just turned back on.
+    if (reactivating) void generateImmediateStandardSlot(standard.id);
     await loadData();
   }
 

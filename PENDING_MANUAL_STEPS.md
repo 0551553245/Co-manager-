@@ -869,7 +869,44 @@ test above — the retried raw REST call should come back `200` with an
 
 ---
 
-## 7. Not blocking today, but needed before real use
+## 7. Add CRON_SECRET to Vercel (2026-08-01, for immediate slot generation)
+
+**New feature (not a bug fix):** creating a task/standard, or reactivating
+one, now immediately generates today's pending slot via a scoped call to
+`generate-daily-slots` — see comanager-logic §4 and
+`lib/slots/generate-immediate-slot.ts`. Verified working end-to-end on
+localhost (task creation, task reactivation, and standard creation all
+confirmed generating a real slot immediately, visible on the
+branch-manager side with zero manual trigger) using the `CRON_SECRET`
+value already configured as a Supabase Edge Function secret.
+
+That secret exists only on the Supabase side (Edge Function secrets) —
+this app's own server (Vercel) also needs it, as a plain server-side env
+var (never `NEXT_PUBLIC_*`), to authenticate its call to the function.
+
+### What to do
+
+1. Vercel dashboard → this project → **Settings → Environment Variables**
+   → add `CRON_SECRET`, scoped to at least Production.
+2. Use the **exact same value** already set via `supabase secrets set
+   CRON_SECRET=...` (see §3.3 above) — this is the same secret in a
+   second location, not a new one. If you don't have that value handy,
+   it's readable from the already-scheduled cron job's stored command:
+   ```sql
+   select command from cron.job where jobname = 'generate-daily-slots';
+   ```
+   (the value appears literally inside the `Authorization` header string
+   in that command).
+3. Redeploy — server-only env vars still need a fresh deployment to be
+   picked up by Vercel's functions, same as any other env var change.
+4. **Not yet run on the live site** — verified locally only. After
+   redeploying, re-test on the live URL: create a task on the owner side,
+   immediately check the branch-manager panel (no manual trigger, no
+   waiting) and confirm it appears right away.
+
+---
+
+## 8. Not blocking today, but needed before real use
 
 - **Cloudinary credentials.** `requires_photo` is currently stubbed
   everywhere (Branch Manager Tasks and Food Safety submission forms) — the

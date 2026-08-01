@@ -5,6 +5,7 @@ import { usePanelAuthContext } from "@/lib/auth/panel-auth-context";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { calcRate, completionBackgroundColor, completionColor } from "@/lib/utils/completion";
 import { riyadhDateString, riyadhDaysAgoString } from "@/lib/utils/riyadh-date";
+import { generateImmediateTaskSlot } from "@/lib/slots/generate-immediate-slot";
 import { TaskModal, type TaskFormValues, type TaskItemFormValues } from "./TaskModal";
 
 interface Task {
@@ -247,6 +248,11 @@ export default function TasksPage() {
     );
     if (itemsError) return itemsError.message;
 
+    // Immediate same-day slot, on top of the nightly cron's own regular
+    // generation — see lib/slots/generate-immediate-slot.ts. Fire-and-forget:
+    // never blocks the create flow if this fails for any reason.
+    void generateImmediateTaskSlot(data.id);
+
     setModal(null);
     await loadData();
   }
@@ -327,7 +333,12 @@ export default function TasksPage() {
   async function toggleActive(task: Task) {
     // Soft-delete only, same reasoning as branches — cascade would wipe
     // submission history.
+    const reactivating = !task.is_active;
     await client.from("tasks").update({ is_active: !task.is_active }).eq("id", task.id);
+    // Reactivating (not deactivating) needs the same immediate same-day
+    // slot as a brand-new task — a manager shouldn't have to wait until
+    // tomorrow's cron for a task the owner just turned back on.
+    if (reactivating) void generateImmediateTaskSlot(task.id);
     await loadData();
   }
 

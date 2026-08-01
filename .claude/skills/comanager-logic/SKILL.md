@@ -175,6 +175,32 @@ touched it) at the cost of a scheduled job.
 **Do not build a version where "due" is calculated live with no stored
 row** — that was rejected specifically to preserve missed-day history.
 
+**Immediate same-day slot generation (added 2026-08-01):** in addition to
+the nightly cron above, creating a new task/standard, or reactivating one
+that was `is_active: false`, immediately generates *today's* pending
+slot for it right then — so a branch manager sees it without waiting
+until the next midnight run. Founder-directed: a brand-new task
+shouldn't be invisible to managers for up to 24 hours. This reuses the
+exact same slot-creation logic as the cron (see
+`supabase/functions/generate-daily-slots/index.ts`'s scoped
+`{ taskId }` / `{ standardId }` mode) via a server-side call from
+`lib/slots/generate-immediate-slot.ts` — never a second, separately
+maintained copy of the generation logic. Deliberately ignores the
+frequency gate (a weekly task created on a Tuesday still gets an
+immediate slot today, even though the *nightly* cron would normally only
+generate a weekly task's slot on Mondays) — the frequency gate governs
+whether an *existing* task gets a *new recurring* slot on a given day,
+not whether a brand-new/reactivated one gets its first slot at all. Only
+covers creation and reactivation, not edits to an already-active
+task/standard — edits already apply going forward only per Section 7,
+and an active task always already has today's slot (either from a prior
+day's cron run or from this same immediate-generation path), so there's
+nothing to backfill on a plain edit. Fails soft: if the immediate call
+doesn't go through for any reason (missing `CRON_SECRET` in the app's own
+env, function unreachable), the create/reactivate action still succeeds —
+the nightly cron remains the guaranteed fallback that catches it by the
+next day regardless.
+
 ---
 
 ## 5. Submission Requirements (set once at creation)

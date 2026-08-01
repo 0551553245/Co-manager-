@@ -21,6 +21,21 @@
 // for the same day never resets or duplicates an already-generated slot
 // (relies on the unique(task_id, branch_id, due_date) / unique(standard_id,
 // branch_id, due_date) constraints added to comanager-schema.sql for this).
+//
+// Scoped/immediate mode (added 2026-08-01): a request body of
+// `{ "taskId": "..." }` or `{ "standardId": "..." }` generates *today's*
+// slot for just that one task/standard right now, instead of the full
+// cron sweep — called by the owner-side task/standard create and
+// reactivate actions so a manager sees a brand-new (or just-reactivated)
+// item immediately, without waiting for the next midnight run. This is
+// the exact same slot-creation logic below (branch expansion, task_items
+// fan-out, upsert calls) — just fed a one-row `tasks`/`standards` array
+// instead of the full active set, and skipping the frequency gate (an
+// immediate create should always get today's slot regardless of whether
+// today happens to be that task's recurrence day) and the "flip missed"
+// sweep (a global concern, irrelevant to a single new row). The nightly
+// cron's own behavior is completely unchanged — this is purely an
+// additional, narrower invocation path through the same function.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -37,6 +52,17 @@ Deno.serve(async (req: Request) => {
     return new Response("Unauthorized", { status: 401 });
   }
 
+  let scopedTaskId: string | null = null;
+  let scopedStandardId: string | null = null;
+  try {
+    const body = await req.json();
+    if (body?.taskId) scopedTaskId = body.taskId;
+    if (body?.standardId) scopedStandardId = body.standardId;
+  } catch {
+    // No body (or invalid JSON) — normal cron invocation, empty body is expected.
+  }
+  const isScoped = scopedTaskId !== null || scopedStandardId !== null;
+
   const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
   const nowUtc = new Date();
@@ -49,28 +75,58 @@ Deno.serve(async (req: Request) => {
   if (isMonday) frequencies.push("weekly");
   if (isFirstOfMonth) frequencies.push("monthly");
 
-  const { data: tasks, error: tasksError } = await supabase
-    .from("tasks")
-    .select("id, owner_id, branch_id")
-    .eq("is_active", true)
-    .in("frequency", frequencies);
-  if (tasksError) {
-    return new Response(JSON.stringify({ step: "fetch tasks", error: tasksError.message }), { status: 500 });
+  let tasks: { id: string; owner_id: string; branch_id: string | null }[] = [];
+  let standards: { id: string; owner_id: string; branch_id: string | null }[] = [];
+
+  if (scopedTaskId) {
+    // Immediate mode always generates today's slot regardless of the
+    // task's own frequency — the frequency gate above only governs
+    // whether an EXISTING task gets a NEW recurring slot on a given day,
+    // not whether a brand-new (or just-reactivated) task gets its first one.
+    const { data, error } = await supabase
+      .from("tasks")
+      .select("id, owner_id, branch_id")
+      .eq("id", scopedTaskId)
+      .eq("is_active", true);
+    if (error) {
+      return new Response(JSON.stringify({ step: "fetch scoped task", error: error.message }), { status: 500 });
+    }
+    tasks = data ?? [];
+  } else if (!isScoped) {
+    const { data, error } = await supabase
+      .from("tasks")
+      .select("id, owner_id, branch_id")
+      .eq("is_active", true)
+      .in("frequency", frequencies);
+    if (error) {
+      return new Response(JSON.stringify({ step: "fetch tasks", error: error.message }), { status: 500 });
+    }
+    tasks = data ?? [];
   }
 
-  const { data: standards, error: standardsError } = await supabase
-    .from("food_safety_standards")
-    .select("id, owner_id, branch_id")
-    .eq("is_active", true)
-    .in("check_frequency", frequencies);
-  if (standardsError) {
-    return new Response(
-      JSON.stringify({ step: "fetch standards", error: standardsError.message }),
-      { status: 500 },
-    );
+  if (scopedStandardId) {
+    const { data, error } = await supabase
+      .from("food_safety_standards")
+      .select("id, owner_id, branch_id")
+      .eq("id", scopedStandardId)
+      .eq("is_active", true);
+    if (error) {
+      return new Response(JSON.stringify({ step: "fetch scoped standard", error: error.message }), { status: 500 });
+    }
+    standards = data ?? [];
+  } else if (!isScoped) {
+    const { data, error } = await supabase
+      .from("food_safety_standards")
+      .select("id, owner_id, branch_id")
+      .eq("is_active", true)
+      .in("check_frequency", frequencies);
+    if (error) {
+      return new Response(JSON.stringify({ step: "fetch standards", error: error.message }), { status: 500 });
+    }
+    standards = data ?? [];
   }
 
-  const taskIds = (tasks ?? []).map((t) => t.id);
+  const taskIds = tasks.map((t) => t.id);
   const { data: taskItems, error: taskItemsError } = await supabase
     .from("task_items")
     .select("id, task_id")
@@ -88,9 +144,7 @@ Deno.serve(async (req: Request) => {
     itemsByTask.set(i.task_id, list);
   });
 
-  const ownerIds = Array.from(
-    new Set([...(tasks ?? []).map((t) => t.owner_id), ...(standards ?? []).map((s) => s.owner_id)]),
-  );
+  const ownerIds = Array.from(new Set([...tasks.map((t) => t.owner_id), ...standards.map((s) => s.owner_id)]));
   const { data: branches, error: branchesError } = await supabase
     .from("branches")
     .select("id, owner_id")
@@ -110,7 +164,7 @@ Deno.serve(async (req: Request) => {
     branchesByOwner.set(b.owner_id, list);
   });
 
-  const taskRows = (tasks ?? []).flatMap((t) => {
+  const taskRows = tasks.flatMap((t) => {
     const branchIds = t.branch_id ? [t.branch_id] : (branchesByOwner.get(t.owner_id) ?? []);
     return branchIds.map((branchId) => ({
       task_id: t.id,
@@ -120,7 +174,7 @@ Deno.serve(async (req: Request) => {
     }));
   });
 
-  const fsRows = (standards ?? []).flatMap((s) => {
+  const fsRows = standards.flatMap((s) => {
     const branchIds = s.branch_id ? [s.branch_id] : (branchesByOwner.get(s.owner_id) ?? []);
     return branchIds.map((branchId) => ({
       standard_id: s.id,
@@ -130,7 +184,6 @@ Deno.serve(async (req: Request) => {
     }));
   });
 
-  let itemSubRowsAttempted = 0;
   if (taskRows.length > 0) {
     const { error } = await supabase
       .from("task_submissions")
@@ -163,7 +216,6 @@ Deno.serve(async (req: Request) => {
         status: "pending",
       })),
     );
-    itemSubRowsAttempted = itemSubRows.length;
 
     if (itemSubRows.length > 0) {
       const { error: itemSubError } = await supabase
@@ -191,37 +243,43 @@ Deno.serve(async (req: Request) => {
   }
 
   // Flip yesterday-or-earlier pending slots to missed — comanager-logic §4
-  // part 3. 'missed' is a distinct value from 'fail' on food_safety_submissions
-  // (see comanager-schema.sql comment): never checked vs. checked and failed.
-  const { error: missedTaskError } = await supabase
-    .from("task_submissions")
-    .update({ status: "missed" })
-    .eq("status", "pending")
-    .lt("due_date", riyadhToday);
-  if (missedTaskError) {
-    return new Response(
-      JSON.stringify({ step: "flip missed task_submissions", error: missedTaskError.message }),
-      { status: 500 },
-    );
-  }
+  // part 3. Only in normal cron mode: a scoped immediate-generation request
+  // is about one brand-new row for today, not a reason to sweep every
+  // other branch's overdue slots. 'missed' is a distinct value from 'fail'
+  // on food_safety_submissions (see comanager-schema.sql comment): never
+  // checked vs. checked and failed.
+  if (!isScoped) {
+    const { error: missedTaskError } = await supabase
+      .from("task_submissions")
+      .update({ status: "missed" })
+      .eq("status", "pending")
+      .lt("due_date", riyadhToday);
+    if (missedTaskError) {
+      return new Response(
+        JSON.stringify({ step: "flip missed task_submissions", error: missedTaskError.message }),
+        { status: 500 },
+      );
+    }
 
-  const { error: missedFsError } = await supabase
-    .from("food_safety_submissions")
-    .update({ result: "missed" })
-    .eq("result", "pending")
-    .lt("due_date", riyadhToday);
-  if (missedFsError) {
-    return new Response(
-      JSON.stringify({ step: "flip missed food_safety_submissions", error: missedFsError.message }),
-      { status: 500 },
-    );
+    const { error: missedFsError } = await supabase
+      .from("food_safety_submissions")
+      .update({ result: "missed" })
+      .eq("result", "pending")
+      .lt("due_date", riyadhToday);
+    if (missedFsError) {
+      return new Response(
+        JSON.stringify({ step: "flip missed food_safety_submissions", error: missedFsError.message }),
+        { status: 500 },
+      );
+    }
   }
 
   return new Response(
     JSON.stringify({
       ok: true,
       riyadhToday,
-      frequenciesGenerated: frequencies,
+      scoped: isScoped,
+      frequenciesGenerated: isScoped ? null : frequencies,
       taskSlotsAttempted: taskRows.length,
       foodSafetySlotsAttempted: fsRows.length,
     }),
