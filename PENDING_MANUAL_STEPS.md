@@ -74,15 +74,13 @@ alter table public.food_safety_submissions
   check (result in ('pending', 'pass', 'fail', 'missed'));
 ```
 
-**Confirmed still not run (re-checked 2026-07-29 with a real insert, not
-just a query)** — inserting a test row with `result: 'missed'` was
-rejected with `violates check constraint
-"food_safety_submissions_result_check"`. The exact constraint name was
-verified directly against the live DB (Postgres's default auto-generated
-name for an inline column check constraint) — if this errors with
-"constraint does not exist", the constraint was renamed or already
-dropped; check `\d food_safety_submissions` in `psql` or the Table
-Editor's constraints view before re-running.
+**✅ DONE — confirmed applied 2026-08-01** via direct `supabase db query`
+access (newly available in this environment; this file was stale until
+now — it said "not yet run" based on a 2026-07-29 check, but the
+constraint was applied at some point after that without this file being
+updated). Confirmed directly: `pg_get_constraintdef` for
+`food_safety_submissions_result_check` includes `missed` in the allowed
+values.
 
 ### 2.3 — Idempotency constraints for slot generation (from Phase 4)
 
@@ -101,9 +99,12 @@ alter table public.food_safety_submissions
   unique (standard_id, branch_id, due_date);
 ```
 
-**Confirmed still not run (re-checked 2026-07-29)** — inserting two rows
-with the same `(task_id, branch_id, due_date)` was allowed (no rejection),
-confirming this constraint doesn't exist yet.
+**✅ DONE — confirmed applied 2026-08-01** via direct `supabase db query`
+access (this file was stale — it said "not yet run" based on a
+2026-07-29 check). Confirmed directly: both
+`task_submissions_task_id_branch_id_due_date_key` and
+`food_safety_submissions_standard_id_branch_id_due_date_key` exist in
+`pg_constraint`.
 
 > If either `ALTER TABLE ... ADD CONSTRAINT ... UNIQUE` fails with a
 > duplicate-key error, it means two rows already exist for the same
@@ -152,9 +153,11 @@ for each row
 execute function public.enforce_branch_cap();
 ```
 
-**Not yet run.** The app-level pre-check (layer 2) will be built alongside
-this, but this trigger is the layer that actually matters — don't skip it
-even after the app-level check ships.
+**✅ DONE — confirmed applied 2026-08-01** via direct `supabase db query`
+access (this file was stale — said "not yet run"). Confirmed directly:
+`trg_enforce_branch_cap` exists in `pg_trigger`, and the function's body
+already includes the `pg_advisory_xact_lock` addition from §6.2 below —
+both were applied together at some point.
 
 ### 2.5 — CRITICAL: fix cross-owner RLS data leak (BUG#019, 2026-07-29) — run before 2.6
 
@@ -212,9 +215,10 @@ create policy "manager reads applicable schedule_events"
   );
 ```
 
-**Not yet run.** `my_owner_id()` must exist before §2.6 runs, since the new
-`task_items` table's own RLS policy (below) also uses it — that's why this
-section is now numbered ahead of the tasks-as-checklists migration.
+**✅ DONE — confirmed applied 2026-08-01** via direct `supabase db query`
+access (this file was stale — said "not yet run"). Confirmed directly:
+`my_owner_id()` exists, and the `"manager reads applicable tasks"` policy
+on `public.tasks` already references it in its `USING` clause.
 
 ### 2.6 — Tasks-as-checklists: task_items + task_item_submissions (2026-07-29 decision)
 
@@ -337,12 +341,13 @@ create policy "manager manages own branch task_item_submissions"
 commit;
 ```
 
-**Not yet run — blocks the new Tasks UI entirely until applied.** After
-running this, any existing test task rows will have no items yet (their
-old requires_* values are gone) — either delete the old test tasks
-("Opening Checklist" / "Closing Checklist") and recreate them with real
-items through the new UI, or manually insert a `task_items` row for each
-via the SQL Editor so they have at least one item.
+**✅ DONE — confirmed applied 2026-08-01** via direct `supabase db query`
+access (this file was badly stale — said "not yet run, blocks the Tasks
+UI entirely," but the Tasks UI has clearly been working against
+`task_items`/`task_item_submissions` throughout every session since, which
+wouldn't be possible otherwise). Confirmed directly: both tables exist,
+and `tasks.requires_photo` / `task_submissions.photo_url` no longer exist
+(the columns this migration drops).
 
 ---
 
@@ -713,13 +718,15 @@ create policy "manager updates own branch fs submissions"
   with check (branch_id = public.my_branch_id());
 ```
 
-**Not yet run.** After running, re-verify with the same raw-REST DELETE
-test as a signed-in branch manager against any of the three tables — it
-should now come back `403`/empty instead of `200`. The app itself needs no
-code change: it never called INSERT or DELETE on these tables from the
-manager side to begin with (confirmed by reading
-`app/branch-manager/(authenticated)/tasks/page.tsx` and the food-safety
-equivalent — both only ever `.update()` an existing pre-created row).
+**✅ DONE — confirmed applied 2026-08-01** via direct `supabase db query`
+access (this file was stale — said "not yet run"). Confirmed directly:
+the old `"manager manages own branch submissions"` (`for all`) policy no
+longer exists on `task_submissions` — replaced by the narrower
+select+update pair. The app itself needed no code change: it never called
+INSERT or DELETE on these tables from the manager side to begin with
+(confirmed by reading `app/branch-manager/(authenticated)/tasks/page.tsx`
+and the food-safety equivalent — both only ever `.update()` an existing
+pre-created row).
 
 ### 6.2 — Cap-enforcement TOCTOU race (audit finding #3)
 
@@ -804,7 +811,10 @@ statements already reference these functions by name, so no trigger needs
 to be dropped or recreated, just re-running these two blocks updates the
 logic the triggers call.
 
-**Not yet run.**
+**✅ DONE — confirmed applied 2026-08-01** via direct `supabase db query`
+access (this file was stale — said "not yet run"). Confirmed directly for
+both functions individually: `enforce_branch_cap()` and
+`enforce_manager_cap()` both have `pg_advisory_xact_lock` in their body.
 
 ### 6.3 — CRITICAL: my_role()/my_branch_id() never checked is_active (2026-07-30)
 
@@ -863,9 +873,14 @@ as a real, known, currently-theoretical gap rather than fixing it
 unprompted, same as how this fix itself was flagged before being asked
 for.
 
-**Not yet run.** After running, re-verify with the same live-deactivation
-test above — the retried raw REST call should come back `200` with an
-**empty array**, not the same rows.
+**✅ DONE — applied and confirmed 2026-08-01** via direct `supabase db
+query` access (newly available in this environment). Re-ran the exact
+live-deactivation test above after applying: before deactivation, the
+same session returned 3 rows (`200`); after deactivation, the *same
+never-refreshed token* returned an empty array (`200`, `[]`) instead of
+the same unchanged rows. Also confirmed via `pg_get_functiondef` that
+`my_role()`'s body now includes `and is_active = true`. Test account
+restored to `is_active: true` immediately after.
 
 ---
 

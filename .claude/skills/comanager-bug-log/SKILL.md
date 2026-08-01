@@ -707,9 +707,10 @@ command), not just each policy in isolation — a narrow-looking policy on
 one row's `using` clause can still widen what's visible when combined
 with a sibling policy for the same command. Applies to `tasks`,
 `food_safety_standards`, and `schedule_events` identically; fixed in all
-three in the same pass. **Manual SQL to apply this fix live is in
-PENDING_MANUAL_STEPS.md — not yet applied to the live DB as of this
-writing.**
+three in the same pass. **✅ Confirmed applied to the live DB 2026-08-01**
+via direct `supabase db query` access — `my_owner_id()` exists and the
+`"manager reads applicable tasks"` policy references it (see
+PENDING_MANUAL_STEPS.md §2.5).
 
 ---
 
@@ -935,9 +936,12 @@ never delivers any event despite confirmed writes to that exact table,
 suspect the publication before suspecting the subscription code — verify
 directly with a standalone script outside the app (bypassing React/HMR
 entirely) before spending time debugging hook logic that is very likely
-already correct. **Manual SQL to apply this fix is in
-PENDING_MANUAL_STEPS.md §4 — not yet applied to the live DB as of this
-writing.**
+already correct. **✅ Confirmed applied to the live DB** — already verified
+working via live cross-tab test in an earlier session, and reconfirmed
+directly via `pg_publication_tables` (2026-08-01, via `supabase db
+query`): all 4 tables (`task_submissions`, `task_item_submissions`,
+`food_safety_submissions`, `schedule_events`) are present in the
+`supabase_realtime` publication (see PENDING_MANUAL_STEPS.md §4).
 
 ---
 
@@ -999,9 +1003,10 @@ defaulting to it silently grants capability nothing in the app exercises
 but anything hitting the REST API directly can. Multiple PERMISSIVE
 policies on the same table OR together (same underlying mechanism as
 BUG#019), so a narrow-looking policy elsewhere doesn't offset one `for
-all` policy granting more than intended. **Manual SQL to apply this fix is
-in PENDING_MANUAL_STEPS.md §6.1 — not yet applied to the live DB as of
-this writing.**
+all` policy granting more than intended. **✅ Confirmed applied to the live
+DB 2026-08-01** via direct `supabase db query` access — the old `for all`
+policy no longer exists on `task_submissions`, replaced by the narrower
+select+update pair (see PENDING_MANUAL_STEPS.md §6.1).
 
 ---
 
@@ -1069,9 +1074,11 @@ whatever the cap is scoped by (owner, branch, etc.) — taken *before* the
 count, not just a `select ... for update` on existing rows (which can't
 help when the race is about whether a *new* row should be allowed to
 exist at all). Use a distinct namespace constant per cap category so
-locks for different caps never contend with each other. **Manual SQL to
-apply this fix is in PENDING_MANUAL_STEPS.md §6.2 — not yet applied to the
-live DB as of this writing.**
+locks for different caps never contend with each other. **✅ Confirmed
+applied to the live DB 2026-08-01** via direct `supabase db query`
+access — both `enforce_branch_cap()` and `enforce_manager_cap()` confirmed
+individually to include `pg_advisory_xact_lock` in their body (see
+PENDING_MANUAL_STEPS.md §6.2).
 
 ---
 
@@ -1452,7 +1459,7 @@ periodically refresh), not duplicated per-page.
 
 ---
 
-### BUG #032 — my_role()/my_branch_id() Never Checked is_active — Deactivation Was Enforced Only Client-Side, Not by RLS
+### BUG #032 — my_role()/my_branch_id() Never Checked is_active — Deactivation Was Enforced Only Client-Side, Not by RLS — ✅ FIXED
 **Severity:** CRITICAL
 **Area/File:** `comanager-schema.sql` — `my_role()`, `my_branch_id()`
 
@@ -1526,11 +1533,14 @@ is (`my_role()`, `my_branch_id()`, and equivalents) must also verify the
 caller is still allowed to act at all (`is_active`), not just that their
 JWT is valid — a valid session and a currently-authorized account are two
 different things, and Supabase Auth only guarantees the former. Verified
-live before AND after intent: proved the gap live pre-fix (deactivation
-had zero effect on RLS-gated access with the same token); manual SQL is
-in PENDING_MANUAL_STEPS.md §6.3, not yet applied to the live DB as of
-this writing — re-run the same live-deactivation test once it is, this
-time expecting an empty result instead of the unchanged rows.
+live before AND after: proved the gap live pre-fix (deactivation had zero
+effect on RLS-gated access with the same token), then **✅ applied and
+reconfirmed live 2026-08-01** via direct `supabase db query` access
+(newly available in this environment) — re-ran the exact
+live-deactivation test above: before deactivation the session returned 3
+rows; after deactivation, the *same never-refreshed token* returned an
+empty array instead of the unchanged rows. See PENDING_MANUAL_STEPS.md
+§6.3.
 
 ---
 
