@@ -1637,6 +1637,98 @@ it.
 
 ---
 
+### BUG #034 — Realtime Never Delivers on the Live Deployment: NEXT_PUBLIC_SUPABASE_ANON_KEY Has a Trailing Newline in Vercel
+**Severity:** CRITICAL
+**Area/File:** Vercel dashboard config (root cause) — not app code; affects every `useRealtimeTable` subscription, every panel, on the live deployment only
+
+**Found during:** "branch-manager dashboard doesn't update after a
+submission" report, explicitly tested on
+`https://co-manager-seven.vercel.app` (2026-08-01), suspecting the
+branch-manager panel might be missing the BUG#023 fix the owner dashboard
+got. Ruled that out immediately: `app/branch-manager/(authenticated)/dashboard/page.tsx`
+has the identical `useRealtimeTable` calls as the owner dashboard, and
+testing the **owner** dashboard the same way (leave it open, complete a
+task in another tab, watch for a live update with zero interaction) showed
+the identical failure — stale data, no live update, on both panels
+equally. This ruled out "one panel is missing something the other has";
+the gap is site-wide.
+
+**Root-caused by instrumenting `window.WebSocket`** on a completely fresh
+tab (patched before the very first authenticated page ever mounted in
+that document, to guarantee catching the true first connection attempt —
+Supabase's realtime client keeps one persistent socket per client
+instance, so testing on an already-loaded tab risks missing a connection
+that was already established before the patch was installed). Every
+connection attempt immediately fired `error` then `close` with code
+`1006` (abnormal closure — never even completed a handshake). The
+connection URL itself was the giveaway:
+
+```
+wss://<project>.supabase.co/realtime/v1/websocket?apikey=<...jwt...>%0A&vsn=2.0.0
+```
+
+`%0A` is a URL-encoded newline, sitting inside the `apikey` query
+parameter. `NEXT_PUBLIC_SUPABASE_ANON_KEY`, as configured in Vercel's
+dashboard, has a literal trailing newline character baked into the
+value — confirmed absent from the local `.env.local` copy of the exact
+same key (checked byte-by-byte: no trailing whitespace on any of the 4
+variables there), so this was introduced specifically when the value was
+entered into Vercel, not inherited from anywhere in this repo.
+
+**Why REST calls (login, every page's data fetching) worked fine
+throughout this same investigation, while only Realtime broke:** the key
+is sent two different ways. As an HTTP `Authorization: Bearer <key>`
+header (every REST call), trailing whitespace gets trimmed by the
+browser's `fetch`/`Headers` handling before the request goes out — a
+newline there is silently tolerated. As a raw WebSocket URL query
+parameter (Realtime's connection handshake), there's no equivalent
+trimming — the literal `\n` travels into the JWT Supabase Realtime tries
+to validate, invalidating it and rejecting the connection outright before
+any subscription can ever succeed.
+
+**Verified live, ruling out the two other suspects the report raised:**
+the `sin1` region change (checked `x-vercel-id`, confirmed correctly
+still deployed — unrelated, this is a connection-validity problem, not a
+latency one) and "branch-manager missing the BUG#023 publication fix"
+(disproven directly — the owner panel, which definitely got that fix,
+fails identically on the live site; the `supabase_realtime` publication
+itself is a database-level setting shared by every environment hitting
+the same project, including localhost, where it works. The bug is
+entirely in how the key's value got typed/pasted into Vercel).
+
+**WRONG (diagnosis to avoid):**
+Assuming this means the branch-manager panel's code is missing
+something, or that the `supabase_realtime` publication (BUG#023) needs
+re-running — neither is true. The code is identical and correct on both
+panels; the publication is a DB-level setting untouched since it was
+fixed, and still correct (confirmed: it's the same database localhost
+was tested against successfully in an earlier session, and REST
+data-fetching against that same database still works fine on the live
+site right now).
+
+**CORRECT (Vercel dashboard action, not a code fix):** re-enter
+`NEXT_PUBLIC_SUPABASE_ANON_KEY` in Vercel → Settings → Environment
+Variables, pasting the value with no trailing newline or whitespace
+(select and copy only the key text itself — many terminal/editor copy
+methods append a trailing newline that isn't visible in most input UIs).
+Redeploy afterward, same as any `NEXT_PUBLIC_*` change — it's baked in at
+build time. See PENDING_MANUAL_STEPS.md §5 (updated) for the exact
+verification method (re-run the same `window.WebSocket` instrumentation
+and confirm a clean `open` event instead of `error`+`close(1006)`).
+
+**Rule:** A malformed secret/key doesn't always fail the same way
+everywhere it's used — validate a suspicious credential against *every*
+transport it travels over, not just the one that happens to be easiest to
+test (HTTP headers tolerate trailing whitespace; WebSocket query
+parameters and JWT signature validation do not). When realtime works on
+one environment (localhost) but not another (a live deployment) against
+the *identical* database, suspect environment-specific configuration
+(env var values, not just their presence) before suspecting the shared
+backend or the app code — they're proven identical in both places by the
+fact that REST calls succeed identically in both.
+
+---
+
 ## ➕ HOW TO ADD A NEW BUG
 
 When you fix a new bug, add it at the bottom of the relevant severity

@@ -563,8 +563,80 @@ localhost — checked both explicitly; neither was the cause.
    upload (`lib/cloudinary/upload-photo.ts`) are very likely broken on
    the live site as well, for the identical reason.
 
-**Not yet run.** After running, re-test login directly on the live URL —
-should redirect to the dashboard, not hang.
+**✅ DONE — confirmed 2026-08-01.** Re-verified live: login now redirects
+correctly on `https://co-manager-seven.vercel.app`, and the deployed JS
+bundle now has the real project URL baked in as a literal constant
+(checked directly). Owner registration and Cloudinary upload weren't
+independently re-tested, but login/data-fetching working end-to-end
+confirms the client-side vars are correct now.
+
+### 5.1 — CRITICAL: NEXT_PUBLIC_SUPABASE_ANON_KEY has a trailing newline in Vercel (2026-08-01)
+
+**Found during:** re-testing the live site after 5.1 above was fixed —
+"branch-manager dashboard doesn't update after a submission" turned out
+to affect **both** panels equally on the live deployment (owner
+dashboard too), while working correctly on localhost against the
+identical Supabase project. Root-caused by instrumenting
+`window.WebSocket` on a fresh tab: every Realtime connection attempt
+immediately failed with `error` + `close(code: 1006)`. The connection URL
+revealed why —
+
+```
+wss://<project>.supabase.co/realtime/v1/websocket?apikey=<...jwt...>%0A&vsn=2.0.0
+```
+
+— `%0A` is a URL-encoded newline sitting inside the `apikey` parameter.
+The anon key value entered into Vercel has a literal trailing newline
+character. Confirmed absent from the local `.env.local` copy of the same
+key (checked byte-by-byte — no trailing whitespace on any of the 4 local
+vars), so this was introduced specifically when pasting the value into
+Vercel's dashboard, most likely via a copy method that includes a
+trailing newline that isn't visible in the input field.
+
+**Why this didn't also break login/data-fetching:** those go over HTTP
+`Authorization: Bearer <key>` headers, where trailing whitespace gets
+silently trimmed before the request is sent — Realtime's WebSocket
+connection URL has no equivalent trimming, so the literal `\n` reaches
+Supabase's validation and gets rejected outright. This is why REST calls
+have worked fine in every test on the live site while Realtime has
+silently never worked there at all.
+
+### What to do
+
+1. Vercel dashboard → this project → **Settings → Environment
+   Variables** → edit `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
+2. Delete the existing value entirely and re-paste it carefully — select
+   only the key text itself, not a trailing newline some copy methods
+   append invisibly. If unsure, copy it from `.env.local` via a method
+   you can verify doesn't include a trailing character (e.g. paste into
+   a plain-text field first and check there's nothing after the last
+   character).
+3. **Redeploy** — same as any `NEXT_PUBLIC_*` change, this is baked in at
+   build time.
+4. **Verify**: open the live site, open DevTools console, paste this
+   before navigating to any authenticated page, then log in:
+   ```js
+   const OrigWS = window.WebSocket;
+   window.WebSocket = function(...args) {
+     const ws = new OrigWS(...args);
+     ws.addEventListener('open', () => console.log('REALTIME OK:', args[0]));
+     ws.addEventListener('close', (e) => console.log('REALTIME FAILED:', e.code, args[0]));
+     return ws;
+   };
+   ```
+   Should log `REALTIME OK`, not `REALTIME FAILED: 1006`. Then do the
+   real test: open the Dashboard in one tab, submit a task as a branch
+   manager in another, confirm the first tab updates within a second or
+   two with zero interaction.
+5. Given this exact mistake likely happened once during initial setup,
+   double-check the other values you pasted into Vercel around the same
+   time for the same issue — trailing whitespace in
+   `SUPABASE_SERVICE_ROLE_KEY` or the Cloudinary vars wouldn't be
+   directly visible the way this one was (nothing exposes them to a
+   URL query string the way Realtime does), so a working REST/upload
+   flow doesn't rule it out the same way.
+
+**Not yet run.**
 
 ---
 
