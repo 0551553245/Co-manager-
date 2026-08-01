@@ -636,7 +636,15 @@ silently never worked there at all.
    URL query string the way Realtime does), so a working REST/upload
    flow doesn't rule it out the same way.
 
-**Not yet run.**
+**✅ DONE — confirmed 2026-08-01.** Re-ran the exact verification method
+above on the live site after the redeploy: confirmed the deployed chunk
+hash changed (fresh build picked up the corrected value), the WebSocket
+connection URL's `apikey` param no longer ends in `%0A`, the connection
+opens successfully, and — the real test — completed a task in one tab
+while a Dashboard sat idle in another; it updated live within about a
+second with zero interaction, and the raw `postgres_changes` `UPDATE`
+message for the exact changed row was captured over the wire. Realtime
+is confirmed genuinely working end-to-end on the live deployment now.
 
 ---
 

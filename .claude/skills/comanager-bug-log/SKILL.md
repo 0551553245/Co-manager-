@@ -1637,9 +1637,20 @@ it.
 
 ---
 
-### BUG #034 — Realtime Never Delivers on the Live Deployment: NEXT_PUBLIC_SUPABASE_ANON_KEY Has a Trailing Newline in Vercel
+### BUG #034 — Realtime Never Delivers on the Live Deployment: NEXT_PUBLIC_SUPABASE_ANON_KEY Has a Trailing Newline in Vercel — ✅ FIXED
 **Severity:** CRITICAL
 **Area/File:** Vercel dashboard config (root cause) — not app code; affects every `useRealtimeTable` subscription, every panel, on the live deployment only
+
+**Resolution confirmed live, 2026-08-01, same day as the finding.** After
+the founder re-entered `NEXT_PUBLIC_SUPABASE_ANON_KEY` in Vercel and
+redeployed, re-ran the identical verification: confirmed the deployed
+chunk hash changed (fresh build), the WebSocket URL's `apikey` no longer
+ends in `%0A`, the connection opens successfully, subscriptions confirm
+`"Subscribed to PostgreSQL"`, and — the real end-to-end test — completed
+a task in one tab while a Dashboard sat idle in another; it updated live
+within about a second with zero interaction, and the raw
+`postgres_changes` `UPDATE` message for the exact changed row was
+captured over the wire. Genuinely fixed, not just "should be fixed."
 
 **Found during:** "branch-manager dashboard doesn't update after a
 submission" report, explicitly tested on
