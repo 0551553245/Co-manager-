@@ -42,6 +42,17 @@ interface SubmissionRow {
   due_date: string;
   status: "completed" | "pending" | "missed";
 }
+interface ExpandedRow {
+  id: string;
+  itemTitle: string;
+  branchId: string;
+  branchName: string;
+  managerName: string;
+  submittedAt: string | null;
+  photoUrl: string | null;
+  note: string | null;
+  valueEntered: number | null;
+}
 
 type ModalState =
   | { type: "create" }
@@ -73,6 +84,9 @@ export default function TasksPage() {
   const [submissions, setSubmissions] = useState<SubmissionRow[]>([]);
   const [dataLoading, setDataLoading] = useState(true);
   const [modal, setModal] = useState<ModalState>(null);
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
+  const [expandedLoading, setExpandedLoading] = useState(false);
+  const [expandedRows, setExpandedRows] = useState<ExpandedRow[]>([]);
 
   const loadData = useCallback(async () => {
     setDataLoading(true);
@@ -106,6 +120,19 @@ export default function TasksPage() {
   // here live, without a manual refresh.
   useRealtimeTable(client, `owner-tasks-${profile?.id ?? "anon"}`, "task_submissions", loadData);
 
+  // Separate subscription for the expanded-card detail view below —
+  // task_submissions changes only affect the card-level stats/strip, but a
+  // manager completing an item only touches task_item_submissions, which
+  // wouldn't otherwise trigger a refetch of whichever card is expanded.
+  useRealtimeTable(
+    client,
+    `owner-tasks-items-${profile?.id ?? "anon"}`,
+    "task_item_submissions",
+    () => {
+      if (expandedTaskId) loadExpandedSubmissions(expandedTaskId);
+    },
+  );
+
   if (loading || !profile) {
     return <main className="p-8 text-sm text-ink/60">Loading...</main>;
   }
@@ -124,6 +151,96 @@ export default function TasksPage() {
     const rows = submissions.filter((s) => s.task_id === taskId && s.due_date === today);
     const completed = rows.filter((r) => r.status === "completed").length;
     return { completed, expectedRows: rows.length };
+  }
+
+  // Submission-detail accordion (comanager-design-match, added 2026-08-04):
+  // fetched on demand only for whichever card is expanded, never prefetched
+  // for every card — today's completed task_item_submissions only, since
+  // pending/missed rows carry no photo/note/value evidence to show.
+  async function loadExpandedSubmissions(taskId: string) {
+    setExpandedLoading(true);
+
+    const { data: subs } = await client
+      .from("task_submissions")
+      .select("id, branch_id")
+      .eq("task_id", taskId)
+      .eq("due_date", today);
+
+    const subIds = (subs ?? []).map((s) => s.id);
+    if (subIds.length === 0) {
+      setExpandedRows([]);
+      setExpandedLoading(false);
+      return;
+    }
+
+    const { data: itemSubs } = await client
+      .from("task_item_submissions")
+      .select("id, task_submission_id, item_id, status, photo_url, note, value_entered, submitted_at, submitted_by")
+      .in("task_submission_id", subIds)
+      .eq("status", "completed");
+
+    const managerIds = Array.from(
+      new Set((itemSubs ?? []).map((s) => s.submitted_by).filter((id): id is string => !!id)),
+    );
+    const { data: managers } =
+      managerIds.length > 0
+        ? await client.from("users").select("id, name").in("id", managerIds)
+        : { data: [] as { id: string; name: string }[] };
+
+    const branchByTaskSub = new Map((subs ?? []).map((s) => [s.id, s.branch_id]));
+    const managerNameById = new Map((managers ?? []).map((m) => [m.id, m.name]));
+
+    const rows: ExpandedRow[] = (itemSubs ?? []).map((s) => {
+      const branchId = branchByTaskSub.get(s.task_submission_id) ?? "";
+      return {
+        id: s.id,
+        itemTitle: items.find((i) => i.id === s.item_id)?.title ?? "Item",
+        branchId,
+        branchName: branches.find((b) => b.id === branchId)?.name ?? "Branch",
+        managerName: (s.submitted_by && managerNameById.get(s.submitted_by)) || "Unknown",
+        submittedAt: s.submitted_at,
+        photoUrl: s.photo_url,
+        note: s.note,
+        valueEntered: s.value_entered,
+      };
+    });
+    rows.sort((a, b) => (b.submittedAt ?? "").localeCompare(a.submittedAt ?? ""));
+
+    setExpandedRows(rows);
+    setExpandedLoading(false);
+  }
+
+  function toggleExpand(task: Task) {
+    if (expandedTaskId === task.id) {
+      setExpandedTaskId(null);
+      setExpandedRows([]);
+      return;
+    }
+    setExpandedTaskId(task.id);
+    setExpandedRows([]);
+    void loadExpandedSubmissions(task.id);
+  }
+
+  function groupRowsByBranch(rows: ExpandedRow[]) {
+    const order: string[] = [];
+    const byBranch = new Map<string, ExpandedRow[]>();
+    rows.forEach((r) => {
+      if (!byBranch.has(r.branchId)) {
+        order.push(r.branchId);
+        byBranch.set(r.branchId, []);
+      }
+      byBranch.get(r.branchId)!.push(r);
+    });
+    return order.map((branchId) => ({
+      branchId,
+      branchName: rows.find((r) => r.branchId === branchId)!.branchName,
+      rows: byBranch.get(branchId)!,
+    }));
+  }
+
+  function formatSubmittedAt(iso: string | null) {
+    if (!iso) return "-";
+    return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
 
   // A global task (branch_id: null) generates one submission row per
@@ -370,13 +487,19 @@ export default function TasksPage() {
             const strip = historyStrip(t.id);
             const itemCount = activeItemsForTask(t.id).length;
 
+            const isExpanded = expandedTaskId === t.id;
+
             return (
               <div
                 key={t.id}
-                className={`rounded-lg bg-card p-4 shadow-sm ${!t.is_active ? "opacity-60" : ""}`}
+                onClick={() => toggleExpand(t)}
+                className={`cursor-pointer rounded-lg bg-card p-4 shadow-sm ${!t.is_active ? "opacity-60" : ""}`}
               >
                 <div className="flex items-start justify-between">
-                  <h3 className="font-display text-lg">{t.title}</h3>
+                  <h3 className="flex items-center gap-1 font-display text-lg">
+                    <span className="text-xs text-ink/40">{isExpanded ? "▾" : "▸"}</span>
+                    {t.title}
+                  </h3>
                   <span
                     className="rounded-pill px-2 py-1 font-mono text-xs font-bold"
                     style={{ backgroundColor: completionBackgroundColor(rate), color }}
@@ -407,21 +530,64 @@ export default function TasksPage() {
 
                 <div className="mt-3 flex gap-2">
                   <button
-                    onClick={() => setModal({ type: "edit", task: t })}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setModal({ type: "edit", task: t });
+                    }}
                     className="rounded border px-3 py-1 text-xs"
                   >
                     Edit
                   </button>
                   <button
-                    onClick={() => setModal({ type: "duplicate", task: t })}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setModal({ type: "duplicate", task: t });
+                    }}
                     className="rounded border px-3 py-1 text-xs"
                   >
                     Duplicate
                   </button>
-                  <button onClick={() => toggleActive(t)} className="rounded border px-3 py-1 text-xs">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void toggleActive(t);
+                    }}
+                    className="rounded border px-3 py-1 text-xs"
+                  >
                     {t.is_active ? "Deactivate" : "Reactivate"}
                   </button>
                 </div>
+
+                {isExpanded && (
+                  <div onClick={(e) => e.stopPropagation()} className="mt-3 cursor-default border-t pt-3">
+                    {expandedLoading ? (
+                      <p className="text-xs text-ink/60">Loading submissions...</p>
+                    ) : expandedRows.length === 0 ? (
+                      <p className="text-xs text-ink/60">No submissions yet today.</p>
+                    ) : t.branch_id ? (
+                      <div className="flex flex-col gap-2">
+                        {expandedRows.map((r) => (
+                          <SubmissionRow key={r.id} row={r} formatTime={formatSubmittedAt} />
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="flex flex-col gap-3">
+                        {groupRowsByBranch(expandedRows).map((group) => (
+                          <div key={group.branchId}>
+                            <p className="mb-1 font-mono text-[10px] font-bold uppercase text-ink/50">
+                              {group.branchName}
+                            </p>
+                            <div className="flex flex-col gap-2">
+                              {group.rows.map((r) => (
+                                <SubmissionRow key={r.id} row={r} formatTime={formatSubmittedAt} />
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             );
           })}
@@ -458,5 +624,54 @@ export default function TasksPage() {
         />
       )}
     </main>
+  );
+}
+
+// Compact submission-detail row (comanager-design-match "Submission detail
+// accordion"): item title + inline evidence as the primary line, manager +
+// time as a smaller secondary line. An item's requires_photo/note/value
+// flags are independent (comanager-logic §5), so more than one piece of
+// evidence can be present at once — all shown together, not one-or-other.
+function SubmissionRow({ row, formatTime }: { row: ExpandedRow; formatTime: (iso: string | null) => string }) {
+  const hasEvidence = row.photoUrl || row.valueEntered !== null || row.note;
+
+  return (
+    <div className="rounded border bg-cream p-2">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-bold">{row.itemTitle}</span>
+        <div className="flex items-center gap-2">
+          {row.photoUrl && (
+            <a
+              href={row.photoUrl}
+              target="_blank"
+              rel="noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="underline"
+              title="View photo"
+            >
+              📷
+            </a>
+          )}
+          {row.valueEntered !== null && (
+            <span className="rounded bg-card px-2 py-0.5 font-mono text-[11px] font-bold">
+              {row.valueEntered}
+            </span>
+          )}
+          {row.note && (
+            <span className="max-w-[10rem] truncate text-[11px] text-ink/70" title={row.note}>
+              "{row.note}"
+            </span>
+          )}
+          {!hasEvidence && (
+            <span className="rounded-pill bg-green/16 px-2 py-0.5 font-mono text-[10px] font-bold uppercase text-green">
+              Done
+            </span>
+          )}
+        </div>
+      </div>
+      <p className="mt-0.5 text-[10px] text-ink/50">
+        {row.managerName} · {formatTime(row.submittedAt)}
+      </p>
+    </div>
   );
 }

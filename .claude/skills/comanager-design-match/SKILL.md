@@ -50,6 +50,35 @@ description: Screen-by-screen inventory of the actual Co Manager UI screens (fro
 - "Duplicate" button per card (clone a task's settings AND its items as a starting point for a new one).
 - "+ New task" opens the low-friction creation modal (comanager-logic §7) — items are added within that same modal (title + per-item requirement toggles, reorderable), not a separate screen.
 
+**Submission detail accordion (added 2026-08-04, founder-confirmed):**
+clicking anywhere on a task card (other than its Edit/Duplicate/Deactivate
+buttons, which stop propagation) expands it downward in place — no
+separate page — to show that task's actual **today's** completed
+`task_item_submissions` (photo/note/value evidence + plain "done"
+checkmarks for checkbox-only items), fetched on demand only for the
+expanded card, not prefetched for every card on the page.
+- **Scope: today only** — not the 7-day history-strip window. The strip
+  stays a glance-level trend; this accordion is a same-day drill-down.
+- **"All branches" tasks: grouped by branch** — a bold branch-name
+  sub-header per branch with activity today, mirroring the Food Safety
+  page's existing "By branch" grouping pattern above. A branch with no
+  completed items today doesn't get an empty group shown. A
+  single-branch task shows a flat list, no branch header (redundant —
+  there's only one branch).
+- **Row layout: compact** — primary line is the item title plus its
+  evidence inline (photo thumbnail / value chip / note snippet / "✓
+  Done" for a plain checkbox item — a single item can show more than one
+  of these at once, since requires_photo/note/value are independent
+  per-item flags, comanager-logic §5); a smaller gray secondary line
+  underneath has manager name and time only
+  (`toLocaleTimeString` HH:mm, same convention as Schedule's event
+  times) — branch is never repeated per row, since the branch grouping
+  header (all-branches tasks) or the card's own scope label
+  (single-branch tasks) already conveys it.
+- Empty state: "No submissions yet today." — same wording style as other
+  empty states in this app (e.g. Branch Manager Tasks' "Nothing due
+  today.").
+
 ### Food Safety (`/owner/food-safety`)
 - Alert banner when there are unresolved failures: "N unresolved food-safety failures", showing branch/standard/submitter/time for the most recent, a "View all" link, and an **Acknowledge** button — matches comanager-logic's fail-state flow exactly.
 - "Standards" section: cards per standard (name, range, Duplicate button).
@@ -105,3 +134,4 @@ description: Screen-by-screen inventory of the actual Co Manager UI screens (fro
 - **7-segment history strip**: needs its own small component, used on Tasks cards.
 - **Avatar**: 2-letter initials in a colored circle (top right of every authenticated screen) — same component across both panels.
 - **Alert banner**: red-tinted, left-icon, title + detail line + action button — used for the food-safety fail alert, likely reusable for other "needs attention" banners later.
+- **Submission detail accordion**: click-to-expand-in-place card → today's completed-item evidence rows, grouped by branch only when the task is scoped to "all branches" — used on Owner Tasks cards; likely reusable on Owner Food Safety's standard cards later if the founder wants the same drill-down there.
