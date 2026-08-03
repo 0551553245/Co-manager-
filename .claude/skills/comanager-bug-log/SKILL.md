@@ -1803,6 +1803,44 @@ deployment for a server-only var — see PENDING_MANUAL_STEPS.md §8 for the
 verification method the founder needs to run directly against Vercel/
 Cloudinary's dashboards.
 
+**✅ RESOLVED — confirmed live 2026-08-03, actual root cause was
+different from (and not fixable by) the `.trim()` gap above.** Ran the
+hash-compare from PENDING_MANUAL_STEPS.md §8.1 for real: SHA-256 of the
+known-good local `.env.local` value (already proven correct — it produced
+a real Cloudinary upload earlier the same session) against the founder's
+copy of Vercel's actual stored value. **Hashes did not match** —
+confirmed, not assumed. Parsed the mismatched value through the exact
+`new URL()` call the code uses to find out *how*: the stored
+`CLOUDINARY_URL` was one env var value with an embedded newline —
+`cloudinary://256223673583943:256223673583943@yaa27rtu` on line one,
+`LaHINLUmj-D_UrmO5slnHBPuefI` (the real secret) stranded on line two.
+Two things were wrong at once: the secret slot held the API key itself
+(duplicated in, not the real secret), and the WHATWG URL parser strips
+newlines from *anywhere* in a string, not just the edges — so the real
+secret on line two silently fused onto the end of the cloud name
+(`yaa27rtuLaHINLUmj-D_UrmO5slnHBPuefI`) instead of ever being read as the
+password. **Important distinction from the `.trim()` fix above: that fix
+alone would NOT have caught this** — `.trim()` only strips leading/
+trailing whitespace, and this newline was in the *middle* of the value,
+between two lines, not at an edge. The two fixes are complementary, not
+duplicates: `.trim()` guards against edge whitespace (the BUG#020-style
+mistake); this resolution is about a completely wrong value being stored,
+which no code-side defensive trimming can fix — only pasting the correct
+value can. Founder pasted the corrected single-line value into Vercel
+(`cloudinary://256223673583943:LaHINLUmj-D_UrmO5slnHBPuefI@yaa27rtu`,
+verified via the same hash method), redeployed, and a real live upload
+was performed end-to-end afterward: confirmed a genuine
+`https://res.cloudinary.com/yaa27rtu/image/upload/...` URL saved to
+`task_item_submissions.photo_url` in the production database — not just
+an absence of the error message. Test data deleted afterward.
+
+**Rule (addendum):** when comparing a suspect credential against a
+known-good one, don't stop at "do the hashes match" as a binary fact —
+if they don't, parse the *actual* bad value through the *same code path*
+the app uses to find out exactly how it diverges. That's what turned "the
+values are different" into an actionable, specific fix (one corrupted
+value with a stray newline) instead of a vague "re-paste and hope."
+
 ---
 
 ## ➕ HOW TO ADD A NEW BUG
