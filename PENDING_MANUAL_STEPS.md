@@ -1009,6 +1009,64 @@ human to open a browser) can distinguish the two.
    also confirm the redeploy actually completed (check the deployment's
    build time against when you saved the env var).
 
+### 8.1 — "Invalid Signature" (2026-08-03): the value is present but wrong, not missing
+
+**Found during:** step 5 above, first attempt — after adding
+`CLOUDINARY_URL` the "not configured" message went away, but Cloudinary
+itself rejected the upload with "Invalid Signature." Checked the
+signature-generation code in `lib/cloudinary/upload-photo.ts` directly
+against Cloudinary's own documented algorithm (params excluding
+`file`/`cloud_name`/`resource_type`/`api_key`, sorted alphabetically,
+joined with `&`, secret appended with no separator, SHA-1) — it matches
+exactly. Also fixed a real (if secondary) gap while checking: none of the
+credential values were `.trim()`ed before use (see comanager-bug-log
+BUG#035) — a stray trailing space/newline on just the secret would
+produce exactly this symptom and wasn't being guarded against. That fix
+ships regardless, but "Invalid Signature" almost always means the
+**value itself** doesn't match Cloudinary's real secret for that account
+— missing/malformed detection (§8 above) and "wrong value" are different
+failure modes needing different checks.
+
+**How to verify the Vercel value is actually correct** — don't just
+eyeball two long random-looking strings side by side, that's exactly how
+whitespace/character mismatches slip through unnoticed (same lesson as
+BUG#034):
+
+1. Open the Cloudinary Console → Dashboard (or Settings → API Keys). Find
+   the **Cloud name**, **API Key**, and click the reveal/eye icon next to
+   **API Secret**. Cloudinary's Dashboard page also shows a ready-made
+   `CLOUDINARY_URL=cloudinary://<key>:<secret>@<cloud_name>` string with
+   its own copy-to-clipboard button — use that button, don't retype it by
+   hand.
+2. In Vercel → Settings → Environment Variables, click into the existing
+   `CLOUDINARY_URL` entry to reveal its current stored value.
+3. Compare the two **without relying on eyeballing**: paste each value
+   (Cloudinary's fresh copy, and Vercel's current one) into this in your
+   own terminal — never paste a real secret to me/into chat — and compare
+   the two hex digests it prints:
+   ```bash
+   echo -n "PASTE_ONE_VALUE_HERE" | shasum -a 256
+   ```
+   (or, in a browser console: `crypto.subtle.digest('SHA-256',
+   new TextEncoder().encode("PASTE_VALUE_HERE")).then(b =>
+   console.log([...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('')))`)
+   Identical hashes = identical values, byte-for-byte — including any
+   whitespace difference the eye would miss. Different hashes confirm a
+   real mismatch, and you can then narrow it down (retype vs. copy-button,
+   check the `api_key` portion vs. the secret portion separately) rather
+   than guessing which character is wrong.
+4. If they don't match: the cleanest fix is to redo step 1's copy-button
+   copy and directly overwrite the Vercel value with it (don't try to
+   hand-edit the existing Vercel value character-by-character) — then
+   redeploy and repeat §8 step 5's verification.
+5. If they DO match and it's still "Invalid Signature": the key/secret
+   pair itself may not correspond to each other (e.g. the API key shown is
+   from a different Cloudinary product environment / sub-account than the
+   secret was copied from at some earlier point) — re-copy **both** the
+   key and the secret together, in the same pass, from the same account
+   page, rather than assuming a previously-correct key is still paired
+   with whatever secret is currently in Vercel.
+
 ## 9. Not blocking today, but needed before real use
 
 - **Moyasar credentials/integration** — Phase 5, not started at all. The

@@ -33,14 +33,22 @@ interface CloudinaryCredentials {
 // combined form by default, so support both rather than forcing a
 // reformat. Explicit vars win if both happen to be set.
 function getCloudinaryCredentials(): CloudinaryCredentials | null {
-  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-  const apiKey = process.env.CLOUDINARY_API_KEY;
-  const apiSecret = process.env.CLOUDINARY_API_SECRET;
+  // .trim() every value read here — same reasoning as BUG#020 (login
+  // input): a stray copy-pasted trailing newline/space on a credential is
+  // invisible in most dashboard input fields but corrupts a signature
+  // computation outright. `new URL()` below happens to strip whitespace
+  // at the very edges of the COMBINED string, but that's incidental, not
+  // a guarantee — it does nothing for the 3-separate-vars path (no URL
+  // parsing involved there at all) or for whitespace that isn't at the
+  // outermost edge, so trim explicitly rather than relying on it.
+  const cloudName = process.env.CLOUDINARY_CLOUD_NAME?.trim();
+  const apiKey = process.env.CLOUDINARY_API_KEY?.trim();
+  const apiSecret = process.env.CLOUDINARY_API_SECRET?.trim();
   if (cloudName && apiKey && apiSecret) {
     return { cloudName, apiKey, apiSecret };
   }
 
-  const combined = process.env.CLOUDINARY_URL;
+  const combined = process.env.CLOUDINARY_URL?.trim();
   if (!combined) return null;
   try {
     const parsed = new URL(combined);

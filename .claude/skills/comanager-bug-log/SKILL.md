@@ -1750,6 +1750,61 @@ fact that REST calls succeed identically in both.
 
 ---
 
+### BUG #035 — Cloudinary Credentials Read Without Trimming, Corrupting the Upload Signature
+**Severity:** MEDIUM
+**Area/File:** `lib/cloudinary/upload-photo.ts` — `getCloudinaryCredentials()`
+
+**Found during:** a live-site report of Cloudinary returning "Invalid
+Signature" on photo upload, after `CLOUDINARY_URL` had already been added
+to Vercel (fixing the earlier "Photo upload isn't configured yet."
+symptom — see PENDING_MANUAL_STEPS.md §8). Re-verified the
+signature-generation code itself against Cloudinary's own documented
+algorithm (params excluding `file`/`cloud_name`/`resource_type`/`api_key`,
+sorted alphabetically, joined with `&`, secret appended directly, SHA-1)
+first — it matches exactly, so the bug isn't in how the signature is
+computed, only in what gets fed into it.
+
+**The gap:** `getCloudinaryCredentials()` read
+`CLOUDINARY_CLOUD_NAME`/`CLOUDINARY_API_KEY`/`CLOUDINARY_API_SECRET` (and
+`CLOUDINARY_URL`) straight from `process.env` with no `.trim()` anywhere
+— same class of mistake as BUG#020 (login input), just never applied
+here. Tested empirically: a trailing newline on the *whole* `CLOUDINARY_URL`
+string happens to get stripped by `new URL()`'s own normalization, so
+that specific case is incidentally safe — but the 3-separate-vars path
+does no URL parsing at all, so a stray trailing space/newline pasted onto
+just `CLOUDINARY_API_SECRET` (or any of the three) flows straight into
+the signature computation uncorrected, producing exactly this symptom:
+a wrong-but-plausible-looking signature that Cloudinary rejects.
+
+**WRONG:**
+```ts
+const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+const apiKey = process.env.CLOUDINARY_API_KEY;
+const apiSecret = process.env.CLOUDINARY_API_SECRET;
+```
+
+**CORRECT:**
+```ts
+const cloudName = process.env.CLOUDINARY_CLOUD_NAME?.trim();
+const apiKey = process.env.CLOUDINARY_API_KEY?.trim();
+const apiSecret = process.env.CLOUDINARY_API_SECRET?.trim();
+```
+(same `.trim()` added to the `CLOUDINARY_URL` combined-form path too,
+before it's handed to `new URL()`.)
+
+**Rule:** Any credential read from `process.env` and fed into a signature/
+hash computation (not just a login form field) must be trimmed —
+whitespace corruption is invisible in almost every dashboard input field
+that shows it, and unlike an HTTP `Authorization` header (which the
+runtime trims for you, per BUG#034), a value concatenated into a string
+you hash yourself gets no such protection. Verify the actual root cause
+(missing vs. malformed value) can't be distinguished from outside the
+deployment for a server-only var — see PENDING_MANUAL_STEPS.md §8 for the
+verification method the founder needs to run directly against Vercel/
+Cloudinary's dashboards.
+
+---
+
 ## ➕ HOW TO ADD A NEW BUG
 
 When you fix a new bug, add it at the bottom of the relevant severity
