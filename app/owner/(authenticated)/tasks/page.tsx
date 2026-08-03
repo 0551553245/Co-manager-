@@ -659,7 +659,7 @@ function SubmissionRow({ row, formatTime }: { row: ExpandedRow; formatTime: (iso
           )}
           {row.note && (
             <span className="max-w-[10rem] truncate text-[11px] text-ink/70" title={row.note}>
-              "{row.note}"
+              &ldquo;{row.note}&rdquo;
             </span>
           )}
           {!hasEvidence && (
