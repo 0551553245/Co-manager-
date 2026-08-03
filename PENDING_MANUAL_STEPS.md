@@ -1067,6 +1067,25 @@ BUG#034):
    page, rather than assuming a previously-correct key is still paired
    with whatever secret is currently in Vercel.
 
+**✅ RESOLVED — 2026-08-03.** Ran the hash-compare from step 3 for real:
+hashed the known-good local `.env.local` value (already proven correct —
+it produced a real Cloudinary upload earlier the same session) against
+the founder's pasted copy of Vercel's stored value. Hashes did **not**
+match, confirming a real, definite corruption rather than a plausible
+guess. Root cause, found by parsing the mismatched value through the
+exact `new URL()` call the code uses: the stored `CLOUDINARY_URL` was one
+value with an embedded newline —
+`cloudinary://256223673583943:256223673583943@yaa27rtu\nLaHINLUmj-D_UrmO5slnHBPuefI`
+— meaning two things were wrong at once: the secret slot held the API
+key itself (duplicated in), not the real secret, and the WHATWG URL
+parser strips newlines from anywhere in a string (not just the edges),
+so the real secret on the second line silently fused onto the end of the
+cloud name instead of being read as the password. Corrected value the
+founder pasted into Vercel (single line, verified via the same hash
+method): `cloudinary://256223673583943:LaHINLUmj-D_UrmO5slnHBPuefI@yaa27rtu`.
+Redeployed and verified with a real live photo upload — see BUG#035 in
+comanager-bug-log for the final confirmed resolution.
+
 ## 9. Not blocking today, but needed before real use
 
 - **Moyasar credentials/integration** — Phase 5, not started at all. The
