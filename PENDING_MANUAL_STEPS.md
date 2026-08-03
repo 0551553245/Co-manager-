@@ -933,13 +933,83 @@ var (never `NEXT_PUBLIC_*`), to authenticate its call to the function.
 
 ---
 
-## 8. Not blocking today, but needed before real use
+## 8. CRITICAL: Set Cloudinary credentials in the Vercel dashboard (2026-08-03)
 
-- **Cloudinary credentials.** `requires_photo` is currently stubbed
-  everywhere (Branch Manager Tasks and Food Safety submission forms) — the
-  UI gates submission on a file being selected, but nothing is actually
-  uploaded, and `photo_url` stays `null`. Once you have a Cloudinary cloud
-  name + upload preset (or API key/secret), that wiring still needs to be
-  built — it was explicitly deferred, not yet started.
+**Found during:** a founder report that photo upload on the live site
+shows "Photo upload isn't configured yet." for any item with
+`requires_photo`. `lib/cloudinary/upload-photo.ts` (built earlier — this
+is NOT the old "stubbed, not yet wired up" state; real Cloudinary upload
+code exists and works locally) returns that exact string from exactly one
+place: `getCloudinaryCredentials()` returned `null`, meaning neither the 3
+separate vars (`CLOUDINARY_CLOUD_NAME`/`CLOUDINARY_API_KEY`/
+`CLOUDINARY_API_SECRET`) nor the combined `CLOUDINARY_URL` resolved to a
+usable credential set on the server that handled the request.
+
+**Confirmed live, not just from the code:** ran the actual
+`requires_photo` submission flow end-to-end against
+`https://co-manager-seven.vercel.app` (disposable owner + branch + branch
+manager, headless-browser-driven, real photo file) — the live server
+action returned the exact string "Photo upload isn't configured yet.
+Contact your restaurant owner." This proves the live deployment's
+`getCloudinaryCredentials()` is returning `null` right now. Test data
+deleted afterward.
+
+**What this technique can't tell you, and why:** unlike
+`NEXT_PUBLIC_SUPABASE_URL`/`NEXT_PUBLIC_SUPABASE_ANON_KEY` (BUG#033/#034),
+Cloudinary's vars are deliberately **server-only** (never
+`NEXT_PUBLIC_*` — comanager-bug-log's own reasoning: the API secret must
+never reach the browser) — so they never get inlined into a client bundle
+at build time, and there's no deployed JS to decompile the way the
+Supabase URL bug was diagnosed. A behavioral test against the live
+`uploadPhoto` Server Action is the closest equivalent (this file's own
+"does the live server actually work" standard), but it can only prove
+*that* the credential lookup is failing, not *why* — both "the vars were
+simply never entered in Vercel" and "a value is present but malformed
+(e.g. the exact BUG#034 trailing-newline mistake, just for a different
+var this time)" produce the identical `null` result and the identical
+user-facing message. Only checking directly in the Vercel dashboard (or
+an authenticated `vercel env ls`, unavailable from this environment — no
+cached CLI session, and completing the device-auth login flow needs a
+human to open a browser) can distinguish the two.
+
+### What to do
+
+1. Vercel dashboard → this project → **Settings → Environment
+   Variables**. Check whether `CLOUDINARY_URL` (or the 3 separate vars)
+   exists at all for **Production**.
+2. **If missing entirely:** add one of:
+   - `CLOUDINARY_URL` — the combined form Cloudinary's own dashboard shows
+     by default: `cloudinary://<API_KEY>:<API_SECRET>@<CLOUD_NAME>`
+     (exactly the same value already in this repo's local `.env.local`
+     for CLOUDINARY_URL — copy it from there if you want the same
+     Cloudinary account dev and prod both use), **or**
+   - the 3 separate vars: `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`,
+     `CLOUDINARY_API_SECRET` (the code checks these first, and falls back
+     to parsing `CLOUDINARY_URL` only if any of the 3 is missing).
+3. **If already present:** re-enter it rather than assuming a visual
+   inspection is enough — this exact project already had one credential
+   (`NEXT_PUBLIC_SUPABASE_ANON_KEY`, BUG#034) silently broken for weeks by
+   a trailing newline invisible in the dashboard's input field. Delete the
+   existing value and re-paste carefully: copy `CLOUDINARY_URL` from
+   `.env.local` (or wherever you're sourcing it) into a plain-text field
+   first and confirm nothing follows the final character before pasting
+   it into Vercel.
+4. **Redeploy** — same as every other env var change in this file,
+   `CLOUDINARY_*` is read server-side at request time (not baked into the
+   client bundle at build time like `NEXT_PUBLIC_*`), but Vercel still
+   only picks up env var changes on a fresh deployment, not on already-running
+   serverless functions.
+5. **Verify**: submit a `requires_photo` task/food-safety item on the live
+   site as a real (or disposable test) branch manager. Success looks like
+   the item completing with a `photo_url` that starts
+   `https://res.cloudinary.com/...` (visible via "View photo" on the
+   owner's Tasks accordion, or a direct DB check). If it still says "Photo
+   upload isn't configured yet," the value is still missing or still
+   malformed — check for the same trailing-whitespace mistake again, and
+   also confirm the redeploy actually completed (check the deployment's
+   build time against when you saved the env var).
+
+## 9. Not blocking today, but needed before real use
+
 - **Moyasar credentials/integration** — Phase 5, not started at all. The
   Billing page (`/owner/settings`) is a UI shell only.
