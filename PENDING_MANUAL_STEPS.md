@@ -914,10 +914,22 @@ var (never `NEXT_PUBLIC_*`), to authenticate its call to the function.
    in that command).
 3. Redeploy — server-only env vars still need a fresh deployment to be
    picked up by Vercel's functions, same as any other env var change.
-4. **Not yet run on the live site** — verified locally only. After
-   redeploying, re-test on the live URL: create a task on the owner side,
-   immediately check the branch-manager panel (no manual trigger, no
-   waiting) and confirm it appears right away.
+4. **✅ DONE — confirmed live 2026-08-03.** Re-tested directly against
+   `https://co-manager-seven.vercel.app` with a fresh, disposable owner
+   account (registered a brand-new owner via the real `/owner/register`
+   flow, added a branch, added a branch manager, created a task scoped to
+   that branch — all through the actual live UI, headless-browser-driven,
+   not direct DB writes). Confirmed via direct `supabase db query` access
+   that a `task_submissions` row (`due_date` = today, `status: pending`)
+   and its child `task_item_submissions` row existed within ~2 seconds of
+   the task-creation click succeeding — and confirmed the branch manager's
+   own `/branch-manager/tasks` page (and Dashboard) showed the new task
+   immediately on first login/page load, with zero manual trigger,
+   deactivate/reactivate step, or wait. `CRON_SECRET` and the other Vercel
+   env vars from §5 are correctly set and working end-to-end on the live
+   deployment. All test data (owner, branch, manager, task, and their auth
+   accounts) was deleted afterward via the service-role key — nothing left
+   behind in the live DB.
 
 ---
 
