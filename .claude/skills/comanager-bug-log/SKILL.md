@@ -1843,6 +1843,91 @@ value with a stray newline) instead of a vague "re-paste and hope."
 
 ---
 
+### BUG #036 — Owner Tasks % Badge Was Row-Level, Not Item-Level — Pegged at 0% Until the Last Checklist Item Was Done
+**Severity:** MEDIUM (correct data, misleading display — not data loss)
+**Area/File:** `app/owner/(authenticated)/tasks/page.tsx` — `todayStatsForTask`
+
+**Found during:** a founder report that after submitting task items as a
+branch manager for three tasks ("mama", "clode", "open") and hard-
+refreshing the owner Tasks page, every card still showed 0%. Investigated
+directly against the live production DB (not inference): `task_submissions`
+and `task_item_submissions` rows were pulled for real. Two of the three
+tasks ("mama", "clode" — one item each) were genuinely `completed`.
+"open" (7 items) had only 2 of 7 items actually `completed` — the other
+5 were still `pending`, `submitted_at: null` — no evidence of a silent
+submission failure (the branch-manager UI already shows an explicit
+"N/N items" count and surfaces validation errors per BUG#013, so partial
+progress there is expected user behavior, not corruption). Also
+confirmed live, with a genuine authenticated owner session (a
+non-destructive one-time token, no password touched) against the actual
+deployed bundle (verified current, not stale — the accordion + item-
+realtime code from recent commits was present in the live JS): the page
+rendered `mama: 100%`, `clode: 100%`, `open: 0%` — exactly matching the
+real DB state, proving neither the query, RLS, nor the deployed code were
+broken.
+
+**The real problem:** a single-branch task has exactly **one**
+`task_submissions` row per day (comanager-logic §4's pre-created-slot
+model — one row per task/branch/due_date). The page's rate was
+`calcRate(completed rows, total rows)` — for a single-branch task that
+denominator is always exactly 1, so the rate can only ever be 0% or
+100%, regardless of how many of the checklist's individual items are
+actually done. "open" (7 items) stays visually frozen at 0% the entire
+time a manager is working through it, only jumping to 100% the instant
+the 7th item is submitted — indistinguishable, at a glance, from "nothing
+is being saved," even though every individual item write was landing
+correctly in the DB the whole time.
+
+**WRONG:**
+```ts
+function todayStatsForTask(taskId: string) {
+  const rows = submissions.filter((s) => s.task_id === taskId && s.due_date === today);
+  const completed = rows.filter((r) => r.status === "completed").length;
+  return { completed, expectedRows: rows.length }; // rows.length is always 1 for a single-branch task
+}
+// rate = calcRate(completed, expectedRows || branchCountForTask(t)) — binary 0%/100%, no partial credit
+```
+
+**CORRECT:**
+```ts
+function todayStatsForTask(taskId: string) {
+  const rowIds = new Set(
+    submissions.filter((s) => s.task_id === taskId && s.due_date === today).map((s) => s.id),
+  );
+  const itemRows = todayItemStats.filter((s) => rowIds.has(s.task_submission_id));
+  const completed = itemRows.filter((r) => r.status === "completed").length;
+  return { completed, expectedItems: itemRows.length }; // e.g. 2 completed / 7 total = 29%
+}
+// rate = calcRate(completed, expectedItems || (activeItemsForTask(t.id).length * branchCountForTask(t)))
+```
+`todayItemStats` is fetched separately (`loadTodayItemStats`), scoped to
+just today's `task_submissions` row ids — a second, dependent query
+(same two-phase pattern the page's own `loadExpandedSubmissions` already
+used), not a `.select('*')`-style blind fetch of the whole table. The
+`task_item_submissions` realtime subscription (`owner-tasks-items-*`,
+already existed for the expanded-accordion refresh) now also re-runs
+this stats fetch on every change, since an item completion alone never
+touches `task_submissions` and wouldn't otherwise trigger the row-level
+subscription.
+
+**Rule:** For any completion-rate display driven by the pre-created-slot
+model (comanager-logic §4), check whether the entity actually has
+sub-rows (checklist items, in this case) that can be partially done
+before treating "row count" as a meaningful denominator — a row-level
+rate is only informative when a row can't itself be partially complete.
+A single-branch task's row is binary by construction (comanager-logic
+§4's own rollup rule: complete only once every item is done), so a
+row-level percentage for anything with more than one item is
+architecturally incapable of showing partial progress, not just
+occasionally wrong. This is a deliberate, asked-and-confirmed change
+(the founder chose item-level over adding a separate progress label or
+leaving it as-is) — Branches' and Reports' completion rates were left as
+row-level intentionally, since those already operate at the
+one-item-implicit-per-submission granularity of tasks/standards as a
+whole rather than a single task's own checklist.
+
+---
+
 ## ➕ HOW TO ADD A NEW BUG
 
 When you fix a new bug, add it at the bottom of the relevant severity

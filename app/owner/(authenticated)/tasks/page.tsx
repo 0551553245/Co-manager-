@@ -38,10 +38,15 @@ interface Branch {
   name: string;
 }
 interface SubmissionRow {
+  id: string;
   task_id: string;
   branch_id: string;
   due_date: string;
   status: "completed" | "pending" | "missed";
+}
+interface TodayItemStat {
+  task_submission_id: string;
+  status: "pending" | "completed" | "missed";
 }
 interface ExpandedRow {
   id: string;
@@ -83,6 +88,7 @@ export default function TasksPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [items, setItems] = useState<TaskItem[]>([]);
   const [submissions, setSubmissions] = useState<SubmissionRow[]>([]);
+  const [todayItemStats, setTodayItemStats] = useState<TodayItemStat[]>([]);
   const [dataLoading, setDataLoading] = useState(true);
   const [modal, setModal] = useState<ModalState>(null);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
@@ -90,9 +96,33 @@ export default function TasksPage() {
   const [expandedRows, setExpandedRows] = useState<ExpandedRow[]>([]);
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
+  // The card %-badge is item-level (2026-08-05 fix — see comanager-bug-log
+  // BUG#036): a single-branch task has exactly one task_submissions row per
+  // day (comanager-logic §4), so a row-level rate can only ever be 0% or
+  // 100% no matter how many of a multi-item checklist's items are actually
+  // done — a task stays pegged at 0% until the very last item is submitted.
+  // Fetched separately (scoped to just today's submission ids), same
+  // two-phase pattern as loadExpandedSubmissions below, since it depends on
+  // knowing today's row ids first.
+  const loadTodayItemStats = useCallback(
+    async (submissionIds: string[]) => {
+      if (submissionIds.length === 0) {
+        setTodayItemStats([]);
+        return;
+      }
+      const { data } = await client
+        .from("task_item_submissions")
+        .select("task_submission_id, status")
+        .in("task_submission_id", submissionIds);
+      setTodayItemStats(data ?? []);
+    },
+    [client],
+  );
+
   const loadData = useCallback(async () => {
     setDataLoading(true);
     const since = riyadhDaysAgoString(6);
+    const today = riyadhDateString();
 
     const [{ data: branchData }, { data: taskData }, { data: itemData }, { data: subData }] = await Promise.all([
       client.from("branches").select("id, name").eq("is_active", true).order("name"),
@@ -104,15 +134,19 @@ export default function TasksPage() {
         .from("task_items")
         .select("id, task_id, title, title_ar, sort_order, requires_photo, requires_note, requires_value, value_min, value_max, is_active")
         .order("sort_order"),
-      client.from("task_submissions").select("task_id, branch_id, due_date, status").gte("due_date", since),
+      client.from("task_submissions").select("id, task_id, branch_id, due_date, status").gte("due_date", since),
     ]);
 
     setBranches(branchData ?? []);
     setTasks(taskData ?? []);
     setItems(itemData ?? []);
     setSubmissions(subData ?? []);
+
+    const todaySubIds = (subData ?? []).filter((s) => s.due_date === today).map((s) => s.id);
+    await loadTodayItemStats(todaySubIds);
+
     setDataLoading(false);
-  }, [client]);
+  }, [client, loadTodayItemStats]);
 
   useEffect(() => {
     if (!loading && profile) loadData();
@@ -122,15 +156,19 @@ export default function TasksPage() {
   // here live, without a manual refresh.
   useRealtimeTable(client, `owner-tasks-${profile?.id ?? "anon"}`, "task_submissions", loadData);
 
-  // Separate subscription for the expanded-card detail view below —
-  // task_submissions changes only affect the card-level stats/strip, but a
-  // manager completing an item only touches task_item_submissions, which
-  // wouldn't otherwise trigger a refetch of whichever card is expanded.
+  // Separate subscription for both the expanded-card detail view AND the
+  // item-level %-badge stats above — task_submissions changes alone don't
+  // fire when a manager completes a single item (that only touches
+  // task_item_submissions), so both need their own refresh path off this
+  // table's realtime feed.
   useRealtimeTable(
     client,
     `owner-tasks-items-${profile?.id ?? "anon"}`,
     "task_item_submissions",
     () => {
+      const today = riyadhDateString();
+      const todaySubIds = submissions.filter((s) => s.due_date === today).map((s) => s.id);
+      void loadTodayItemStats(todaySubIds);
       if (expandedTaskId) loadExpandedSubmissions(expandedTaskId);
     },
   );
@@ -149,10 +187,19 @@ export default function TasksPage() {
     return items.filter((i) => i.task_id === taskId && i.is_active);
   }
 
+  // Item-level, not row-level (BUG#036) — a task_submissions row only
+  // flips to "completed" once every item under it is done (comanager-logic
+  // §4's rollup), so counting rows gives a task with N items exactly two
+  // possible states (0% or 100%) no matter how much real progress exists.
+  // Counting the actual task_item_submissions rows underneath today's
+  // task_submissions row(s) instead gives real partial credit.
   function todayStatsForTask(taskId: string) {
-    const rows = submissions.filter((s) => s.task_id === taskId && s.due_date === today);
-    const completed = rows.filter((r) => r.status === "completed").length;
-    return { completed, expectedRows: rows.length };
+    const rowIds = new Set(
+      submissions.filter((s) => s.task_id === taskId && s.due_date === today).map((s) => s.id),
+    );
+    const itemRows = todayItemStats.filter((s) => rowIds.has(s.task_submission_id));
+    const completed = itemRows.filter((r) => r.status === "completed").length;
+    return { completed, expectedItems: itemRows.length };
   }
 
   // Submission-detail accordion (comanager-design-match, added 2026-08-04):
@@ -480,8 +527,13 @@ export default function TasksPage() {
       ) : (
         <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {tasks.map((t) => {
-            const { completed, expectedRows } = todayStatsForTask(t.id);
-            const rate = calcRate(completed, expectedRows || branchCountForTask(t));
+            const { completed, expectedItems } = todayStatsForTask(t.id);
+            // Fallback for the (rare) case no slot has been generated for
+            // today yet at all — same idea as the old row-based fallback,
+            // just expressed in items: every active item, across every
+            // branch this task applies to.
+            const fallbackExpected = activeItemsForTask(t.id).length * branchCountForTask(t);
+            const rate = calcRate(completed, expectedItems || fallbackExpected);
             const color = completionColor(rate);
             const scopeLabel = t.branch_id
               ? (branches.find((b) => b.id === t.branch_id)?.name ?? "Branch")
