@@ -89,7 +89,31 @@ expanded card, not prefetched for every card on the page.
 - "+ Add shift/event" opens the same low-friction creation modal pattern (comanager-logic §7) — the calendar display itself is naturally more complex than the modal that creates entries; that's fine, the simplicity rule applies to creation, not to the calendar view itself.
 
 ### Reports (`/owner/reports`)
-- Branch filter + Day/Week/Month/3-Months toggle (comanager-context Reporting Rules — Month/3-Months must aggregate, never plot raw daily points).
+- **"Needs Attention" (added 2026-08-05, founder-confirmed)** — cards/list
+  section at the very top of the page, above the branch filter and the
+  Day/Week/Month/3-Months toggle (not just above the charts) — visually
+  signals that it doesn't respond to either control below it. Two card
+  types, both red-accented (`border-l-4 border-red`), shown together in
+  one grid:
+  - **Underperforming branches**: any branch below the 80% completion
+    threshold (comanager-logic §7) **today** — always today, never scoped
+    by the range toggle (that toggle explores history; this is "what's
+    wrong right now"). A branch with zero submissions due today is
+    excluded, not flagged at 0% — nothing due isn't underperformance
+    (same reasoning as BUG#029's denominator fix). Sorted worst-first.
+    **Clicking a branch card sets the page's own branch filter** to that
+    branch (scrolls nothing, just filters the charts below) rather than
+    navigating away.
+  - **Unresolved food-safety failures**: identical definition to the Food
+    Safety page's own alert banner (`result='fail' AND acknowledged_at IS
+    NULL`), same 30-day lookback window for consistency, capped at 5 cards
+    with a "+N more — view all" card linking to `/owner/food-safety` if
+    there are more. **Clicking a failure card navigates to
+    `/owner/food-safety`** (a real page link, unlike the branch cards).
+  - Empty state: a green/success-tinted "Nothing needs attention today."
+    banner, not just an absent section — confirms the check ran rather
+    than looking broken/missing.
+- Branch filter + Day/Week/Month/3-Months toggle (comanager-context Reporting Rules — Month/3-Months must aggregate, never plot raw daily points). **Confirmed already fully built and working as specified** (re-verified 2026-08-05) — Month buckets by week, 3-Months buckets by month, never raw daily points; no changes needed here.
 - Two trend line charts: Completion rate, Food-safety pass rate.
 - "By-branch comparison" — horizontal bar chart, toggle between Completion% and Pass rate%, bars colored by the gradient threshold (green ≥80%, amber below — matches the 80% underperformance threshold from comanager-logic §7... actually §Reporting Rules in comanager-context).
 - "Completion by task category" — bar chart per category.

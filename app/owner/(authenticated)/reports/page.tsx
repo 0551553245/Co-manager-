@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { usePanelAuthContext } from "@/lib/auth/panel-auth-context";
 import { calcRate, completionBackgroundColor, completionColor, UNDERPERFORMING_THRESHOLD } from "@/lib/utils/completion";
 import {
@@ -31,6 +32,22 @@ interface FsSub {
   due_date: string;
   result: "pending" | "pass" | "fail";
 }
+interface FsStandard {
+  id: string;
+  title: string;
+}
+// Unresolved food-safety failures for "Needs Attention" — same definition
+// the Food Safety page's own alert banner already uses (result='fail' AND
+// acknowledged_at IS NULL), fetched independently of the range toggle
+// (comanager-design-match: this section is a fixed "today" snapshot, not
+// scoped by Day/Week/Month/3-Months) over the same 30-day window that
+// page uses, for consistency.
+interface FsAttentionRow {
+  id: string;
+  standard_id: string;
+  branch_id: string;
+  submitted_at: string | null;
+}
 
 const RANGE_LABEL: Record<ReportRange, string> = {
   day: "Day",
@@ -60,6 +77,8 @@ export default function ReportsPage() {
   const [taskSubs, setTaskSubs] = useState<TaskSub[]>([]);
   const [fsSubs, setFsSubs] = useState<FsSub[]>([]);
   const [heatmapSubs, setHeatmapSubs] = useState<TaskSub[]>([]);
+  const [fsStandards, setFsStandards] = useState<FsStandard[]>([]);
+  const [attentionFsSubs, setAttentionFsSubs] = useState<FsAttentionRow[]>([]);
   const [dataLoading, setDataLoading] = useState(true);
   const [range, setRange] = useState<ReportRange>("week");
   const [branchFilter, setBranchFilter] = useState<string>("");
@@ -70,22 +89,45 @@ export default function ReportsPage() {
       setDataLoading(true);
       const since = rangeStartDate(currentRange);
       const tenWeeksAgo = riyadhDaysAgoString(70);
+      // Needs Attention is a fixed "today" snapshot, independent of the
+      // range toggle (founder-confirmed) — the fs-failures half still
+      // needs its own bounded window (a fail can be days old and still
+      // unresolved), matching the Food Safety page's own 30-day window
+      // for its identical alert banner, for consistency.
+      const thirtyDaysAgo = riyadhDaysAgoString(29);
 
-      const [{ data: branchData }, { data: taskData }, { data: taskSubData }, { data: fsSubData }, { data: heatmapData }] =
-        await Promise.all([
-          client.from("branches").select("id, name").eq("is_active", true).order("name"),
-          client.from("tasks").select("id, category"),
-          client.from("task_submissions").select("task_id, branch_id, due_date, status").gte("due_date", since),
-          client.from("food_safety_submissions").select("branch_id, due_date, result").gte("due_date", since),
-          client
-            .from("task_submissions")
-            .select("task_id, branch_id, due_date, status")
-            .gte("due_date", tenWeeksAgo),
-        ]);
+      const [
+        { data: branchData },
+        { data: taskData },
+        { data: taskSubData },
+        { data: fsSubData },
+        { data: heatmapData },
+        { data: fsStandardData },
+        { data: attentionFsData },
+      ] = await Promise.all([
+        client.from("branches").select("id, name").eq("is_active", true).order("name"),
+        client.from("tasks").select("id, category"),
+        client.from("task_submissions").select("task_id, branch_id, due_date, status").gte("due_date", since),
+        client.from("food_safety_submissions").select("branch_id, due_date, result").gte("due_date", since),
+        client
+          .from("task_submissions")
+          .select("task_id, branch_id, due_date, status")
+          .gte("due_date", tenWeeksAgo),
+        client.from("food_safety_standards").select("id, title"),
+        client
+          .from("food_safety_submissions")
+          .select("id, standard_id, branch_id, submitted_at")
+          .eq("result", "fail")
+          .is("acknowledged_at", null)
+          .gte("due_date", thirtyDaysAgo)
+          .order("submitted_at", { ascending: false }),
+      ]);
 
       setBranches(branchData ?? []);
       setTasks(taskData ?? []);
       setTaskSubs(taskSubData ?? []);
+      setFsStandards(fsStandardData ?? []);
+      setAttentionFsSubs(attentionFsData ?? []);
       setFsSubs(fsSubData ?? []);
       setHeatmapSubs(heatmapData ?? []);
       setDataLoading(false);
@@ -104,6 +146,43 @@ export default function ReportsPage() {
   const scopedTaskSubs = branchFilter ? taskSubs.filter((s) => s.branch_id === branchFilter) : taskSubs;
   const scopedFsSubs = branchFilter ? fsSubs.filter((s) => s.branch_id === branchFilter) : fsSubs;
   const bucket = RANGE_BUCKET[range];
+
+  // Needs Attention (comanager-logic §7, comanager-design-match) —
+  // deliberately built from the FULL (unfiltered) taskSubs/branches, not
+  // scopedTaskSubs/branchFilter: this section always shows every branch
+  // that needs attention today, independent of both the range toggle and
+  // the branch filter dropdown below it — those control the charts, this
+  // is a fixed "what needs your attention right now" snapshot.
+  const today = riyadhDateString();
+  const todaysTaskSubs = taskSubs.filter((s) => s.due_date === today);
+  const underperformingBranches = branches
+    .map((b) => {
+      const rows = todaysTaskSubs.filter((s) => s.branch_id === b.id);
+      const completed = rows.filter((s) => s.status === "completed").length;
+      return { branch: b, completed, total: rows.length, rate: calcRate(completed, rows.length) };
+    })
+    // A branch with zero submissions today has nothing due yet, not a
+    // real underperformance — calcRate(0,0) returning 0 would otherwise
+    // wrongly flag every brand-new/quiet branch (same reasoning as
+    // BUG#029: a rate's denominator must be real submission rows).
+    .filter((s) => s.total > 0 && s.rate < UNDERPERFORMING_THRESHOLD)
+    .sort((a, b) => a.rate - b.rate);
+
+  const standardTitleById = new Map(fsStandards.map((s) => [s.id, s.title]));
+  const branchNameById = new Map(branches.map((b) => [b.id, b.name]));
+  const ATTENTION_FS_LIMIT = 5;
+  const unresolvedFsFailures = attentionFsSubs.slice(0, ATTENTION_FS_LIMIT).map((f) => ({
+    id: f.id,
+    standardTitle: standardTitleById.get(f.standard_id) ?? "Standard",
+    branchName: branchNameById.get(f.branch_id) ?? "Branch",
+    submittedAt: f.submitted_at,
+  }));
+  const hiddenFsFailureCount = Math.max(0, attentionFsSubs.length - ATTENTION_FS_LIMIT);
+
+  function formatAttentionTime(iso: string | null) {
+    if (!iso) return "-";
+    return new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  }
 
   // Completion rate trend
   const completionBuckets = new Map<string, { completed: number; total: number }>();
@@ -184,6 +263,55 @@ export default function ReportsPage() {
   return (
     <main className="p-8">
       <h1 className="font-display text-2xl">Reports</h1>
+
+      {!dataLoading && (
+        <div className="mt-4">
+          <h2 className="font-display text-sm">Needs Attention</h2>
+          {underperformingBranches.length === 0 && unresolvedFsFailures.length === 0 ? (
+            <p className="mt-2 rounded-lg bg-success/16 p-3 text-sm text-success-ink">
+              Nothing needs attention today.
+            </p>
+          ) : (
+            <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {underperformingBranches.map(({ branch, rate, completed, total }) => (
+                <button
+                  key={branch.id}
+                  type="button"
+                  onClick={() => setBranchFilter(branch.id)}
+                  className="rounded-lg border-l-4 border-red bg-card p-4 text-left shadow-sm"
+                >
+                  <p className="font-display text-sm font-bold">{branch.name}</p>
+                  <p className="mt-1 font-mono text-xs font-bold" style={{ color: completionColor(rate) }}>
+                    {rate}% completion today
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-ink/50">
+                    {completed}/{total} tasks done
+                  </p>
+                </button>
+              ))}
+              {unresolvedFsFailures.map((f) => (
+                <Link
+                  key={f.id}
+                  href="/owner/food-safety"
+                  className="rounded-lg border-l-4 border-red bg-card p-4 shadow-sm"
+                >
+                  <p className="font-display text-sm font-bold">{f.standardTitle}</p>
+                  <p className="mt-1 text-xs text-ink/70">{f.branchName}</p>
+                  <p className="mt-0.5 text-[11px] text-ink/50">{formatAttentionTime(f.submittedAt)}</p>
+                </Link>
+              ))}
+              {hiddenFsFailureCount > 0 && (
+                <Link
+                  href="/owner/food-safety"
+                  className="flex items-center justify-center rounded-lg border-l-4 border-ink/20 bg-card p-4 text-sm text-ink/60 shadow-sm"
+                >
+                  +{hiddenFsFailureCount} more unresolved — view all
+                </Link>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="mt-4 flex flex-wrap items-center gap-3">
         <select
