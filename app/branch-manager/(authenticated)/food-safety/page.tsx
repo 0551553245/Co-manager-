@@ -6,6 +6,7 @@ import { usePanelAuthContext } from "@/lib/auth/panel-auth-context";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { uploadPhoto } from "@/lib/cloudinary/upload-photo";
 import { riyadhDateString } from "@/lib/utils/riyadh-date";
+import { PhotoLightbox } from "@/components/PhotoLightbox";
 
 interface Standard {
   id: string;
@@ -37,6 +38,7 @@ export default function BranchManagerFoodSafetyPage() {
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [dataLoading, setDataLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
     if (!profile?.branch_id) {
@@ -114,11 +116,13 @@ export default function BranchManagerFoodSafetyPage() {
                 client={client}
                 submittedBy={profile.id}
                 onSubmitted={loadData}
+                onPhotoClick={setLightboxUrl}
               />
             );
           })}
         </div>
       )}
+      {lightboxUrl && <PhotoLightbox photoUrl={lightboxUrl} onClose={() => setLightboxUrl(null)} />}
     </main>
   );
 }
@@ -129,12 +133,14 @@ function ReadingCard({
   client,
   submittedBy,
   onSubmitted,
+  onPhotoClick,
 }: {
   standard: Standard;
   submission: Submission;
   client: SupabaseClient;
   submittedBy: string;
   onSubmitted: () => void;
+  onPhotoClick: (url: string) => void;
 }) {
   const [value, setValue] = useState("");
   const [note, setNote] = useState("");
@@ -205,9 +211,13 @@ function ReadingCard({
         </div>
         <p className="mt-1 font-mono text-sm">{submission.actual_value}</p>
         {submission.photo_url && (
-          <a href={submission.photo_url} target="_blank" rel="noreferrer" className="mt-1 inline-block text-xs underline">
+          <button
+            type="button"
+            onClick={() => onPhotoClick(submission.photo_url!)}
+            className="mt-1 inline-block text-xs underline"
+          >
             View photo
-          </a>
+          </button>
         )}
       </div>
     );

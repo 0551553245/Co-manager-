@@ -6,6 +6,7 @@ import { usePanelAuthContext } from "@/lib/auth/panel-auth-context";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { uploadPhoto } from "@/lib/cloudinary/upload-photo";
 import { riyadhDateString } from "@/lib/utils/riyadh-date";
+import { PhotoLightbox } from "@/components/PhotoLightbox";
 
 interface TaskDef {
   id: string;
@@ -51,6 +52,7 @@ export default function BranchManagerTasksPage() {
   const [itemSubs, setItemSubs] = useState<TaskItemSub[]>([]);
   const [dataLoading, setDataLoading] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
     if (!profile?.branch_id) {
@@ -194,14 +196,13 @@ export default function BranchManagerTasksPage() {
                               {itemSub.note && <p>Note: {itemSub.note}</p>}
                               {itemSub.value_entered !== null && <p>Value: {itemSub.value_entered}</p>}
                               {itemSub.photo_url && (
-                                <a
-                                  href={itemSub.photo_url}
-                                  target="_blank"
-                                  rel="noreferrer"
+                                <button
+                                  type="button"
+                                  onClick={() => setLightboxUrl(itemSub.photo_url)}
                                   className="mt-1 inline-block underline"
                                 >
                                   View photo
-                                </a>
+                                </button>
                               )}
                             </div>
                           )}
@@ -215,6 +216,7 @@ export default function BranchManagerTasksPage() {
           })}
         </div>
       )}
+      {lightboxUrl && <PhotoLightbox photoUrl={lightboxUrl} onClose={() => setLightboxUrl(null)} />}
     </main>
   );
 }

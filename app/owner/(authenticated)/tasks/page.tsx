@@ -6,6 +6,7 @@ import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { calcRate, completionBackgroundColor, completionColor } from "@/lib/utils/completion";
 import { riyadhDateString, riyadhDaysAgoString } from "@/lib/utils/riyadh-date";
 import { generateImmediateTaskSlot } from "@/lib/slots/generate-immediate-slot";
+import { PhotoLightbox } from "@/components/PhotoLightbox";
 import { TaskModal, type TaskFormValues, type TaskItemFormValues } from "./TaskModal";
 
 interface Task {
@@ -87,6 +88,7 @@ export default function TasksPage() {
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [expandedLoading, setExpandedLoading] = useState(false);
   const [expandedRows, setExpandedRows] = useState<ExpandedRow[]>([]);
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
     setDataLoading(true);
@@ -567,7 +569,7 @@ export default function TasksPage() {
                     ) : t.branch_id ? (
                       <div className="flex flex-col gap-2">
                         {expandedRows.map((r) => (
-                          <SubmissionRow key={r.id} row={r} formatTime={formatSubmittedAt} />
+                          <SubmissionRow key={r.id} row={r} formatTime={formatSubmittedAt} onPhotoClick={setLightboxUrl} />
                         ))}
                       </div>
                     ) : (
@@ -579,7 +581,7 @@ export default function TasksPage() {
                             </p>
                             <div className="flex flex-col gap-2">
                               {group.rows.map((r) => (
-                                <SubmissionRow key={r.id} row={r} formatTime={formatSubmittedAt} />
+                                <SubmissionRow key={r.id} row={r} formatTime={formatSubmittedAt} onPhotoClick={setLightboxUrl} />
                               ))}
                             </div>
                           </div>
@@ -623,6 +625,7 @@ export default function TasksPage() {
           onSubmit={handleCreate}
         />
       )}
+      {lightboxUrl && <PhotoLightbox photoUrl={lightboxUrl} onClose={() => setLightboxUrl(null)} />}
     </main>
   );
 }
@@ -632,7 +635,15 @@ export default function TasksPage() {
 // time as a smaller secondary line. An item's requires_photo/note/value
 // flags are independent (comanager-logic §5), so more than one piece of
 // evidence can be present at once — all shown together, not one-or-other.
-function SubmissionRow({ row, formatTime }: { row: ExpandedRow; formatTime: (iso: string | null) => string }) {
+function SubmissionRow({
+  row,
+  formatTime,
+  onPhotoClick,
+}: {
+  row: ExpandedRow;
+  formatTime: (iso: string | null) => string;
+  onPhotoClick: (url: string) => void;
+}) {
   const hasEvidence = row.photoUrl || row.valueEntered !== null || row.note;
 
   return (
@@ -641,16 +652,17 @@ function SubmissionRow({ row, formatTime }: { row: ExpandedRow; formatTime: (iso
         <span className="text-xs font-bold">{row.itemTitle}</span>
         <div className="flex items-center gap-2">
           {row.photoUrl && (
-            <a
-              href={row.photoUrl}
-              target="_blank"
-              rel="noreferrer"
-              onClick={(e) => e.stopPropagation()}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onPhotoClick(row.photoUrl!);
+              }}
               className="underline"
               title="View photo"
             >
               📷
-            </a>
+            </button>
           )}
           {row.valueEntered !== null && (
             <span className="rounded bg-card px-2 py-0.5 font-mono text-[11px] font-bold">
