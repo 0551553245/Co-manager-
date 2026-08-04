@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePanelAuthContext } from "@/lib/auth/panel-auth-context";
+import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { calcRate, completionColor, UNDERPERFORMING_THRESHOLD } from "@/lib/utils/completion";
 import {
   bucketKey,
@@ -122,8 +123,14 @@ export default function ReportsPage() {
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
   const loadData = useCallback(
-    async (currentRange: ReportRange) => {
-      setDataLoading(true);
+    async (currentRange: ReportRange, opts?: { background?: boolean }) => {
+      // Realtime-triggered reloads run "in the background": the page
+      // already has valid data on screen, so replacing it with the full
+      // skeleton on every live submission would be a jarring wipe rather
+      // than a "live update." Only mount/range/branch-filter-driven loads
+      // (the ones the user just took an action to trigger) show the
+      // skeleton — see the debounced realtime subscriptions below.
+      if (!opts?.background) setDataLoading(true);
       setLoadError(null);
       const prevBounds = previousRangeBounds(currentRange);
       const thirtyDaysAgo = riyadhDaysAgoString(29);
@@ -176,7 +183,7 @@ export default function ReportsPage() {
       } catch (err) {
         setLoadError(err instanceof Error ? err.message : "Something went wrong loading reports.");
       } finally {
-        setDataLoading(false);
+        if (!opts?.background) setDataLoading(false);
       }
     },
     [client],
@@ -185,6 +192,33 @@ export default function ReportsPage() {
   useEffect(() => {
     if (!loading && profile) loadData(range);
   }, [loading, profile, range, loadData]);
+
+  // Realtime (comanager-conventions): one subscription per source table,
+  // fanning out to every KPI/chart/table on the page via the same loadData
+  // — never a separate channel per card. Debounced (trailing 1.5s) rather
+  // than firing on every single event: this page's query window can span
+  // up to ~180 days (3-month range + its prior-period comparison), so a
+  // burst of near-simultaneous submissions (e.g. several branches at
+  // opening time) would otherwise trigger that same wide refetch once per
+  // event. `background: true` skips the full-page skeleton so a live
+  // update swaps data in quietly instead of wiping the page the user is
+  // currently looking at.
+  const reloadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleBackgroundReload = useCallback(() => {
+    if (reloadTimeoutRef.current) clearTimeout(reloadTimeoutRef.current);
+    reloadTimeoutRef.current = setTimeout(() => {
+      loadData(range, { background: true });
+    }, 1500);
+  }, [loadData, range]);
+
+  useEffect(() => {
+    return () => {
+      if (reloadTimeoutRef.current) clearTimeout(reloadTimeoutRef.current);
+    };
+  }, []);
+
+  useRealtimeTable(client, `owner-reports-${profile?.id ?? "anon"}`, "task_submissions", scheduleBackgroundReload);
+  useRealtimeTable(client, `owner-reports-fs-${profile?.id ?? "anon"}`, "food_safety_submissions", scheduleBackgroundReload);
 
   if (loading || !profile) {
     return <main className="p-8 text-sm text-ink/60">Loading...</main>;
