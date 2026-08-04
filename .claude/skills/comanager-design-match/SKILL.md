@@ -88,36 +88,150 @@ expanded card, not prefetched for every card on the page.
 - Full calendar (Month/Week/Day toggle), color-coded event blocks by type (Training=green, Inspection=amber, Audit=red, Meeting=neutral).
 - "+ Add shift/event" opens the same low-friction creation modal pattern (comanager-logic §7) — the calendar display itself is naturally more complex than the modal that creates entries; that's fine, the simplicity rule applies to creation, not to the calendar view itself.
 
-### Reports (`/owner/reports`)
-- **"Needs Attention" (added 2026-08-05, founder-confirmed)** — cards/list
-  section at the very top of the page, above the branch filter and the
-  Day/Week/Month/3-Months toggle (not just above the charts) — visually
-  signals that it doesn't respond to either control below it. Two card
-  types, both red-accented (`border-l-4 border-red`), shown together in
-  one grid:
-  - **Underperforming branches**: any branch below the 80% completion
-    threshold (comanager-logic §7) **today** — always today, never scoped
-    by the range toggle (that toggle explores history; this is "what's
-    wrong right now"). A branch with zero submissions due today is
-    excluded, not flagged at 0% — nothing due isn't underperformance
-    (same reasoning as BUG#029's denominator fix). Sorted worst-first.
-    **Clicking a branch card sets the page's own branch filter** to that
-    branch (scrolls nothing, just filters the charts below) rather than
-    navigating away.
-  - **Unresolved food-safety failures**: identical definition to the Food
-    Safety page's own alert banner (`result='fail' AND acknowledged_at IS
-    NULL`), same 30-day lookback window for consistency, capped at 5 cards
-    with a "+N more — view all" card linking to `/owner/food-safety` if
-    there are more. **Clicking a failure card navigates to
-    `/owner/food-safety`** (a real page link, unlike the branch cards).
-  - Empty state: a green/success-tinted "Nothing needs attention today."
-    banner, not just an absent section — confirms the check ran rather
-    than looking broken/missing.
-- Branch filter + Day/Week/Month/3-Months toggle (comanager-context Reporting Rules — Month/3-Months must aggregate, never plot raw daily points). **Confirmed already fully built and working as specified** (re-verified 2026-08-05) — Month buckets by week, 3-Months buckets by month, never raw daily points; no changes needed here.
-- Two trend line charts: Completion rate, Food-safety pass rate.
-- "By-branch comparison" — horizontal bar chart, toggle between Completion% and Pass rate%, bars colored by the gradient threshold (green ≥80%, amber below — matches the 80% underperformance threshold from comanager-logic §7... actually §Reporting Rules in comanager-context).
-- "Completion by task category" — bar chart per category.
-- "Day-of-week pattern (last 10 weeks)" — a GitHub-style heatmap, intensity by completion level. New pattern, not previously documented — needs a query grouping submissions by day-of-week over a rolling 10-week window.
+### Reports (`/owner/reports`) — full rebuild, 2026-08-05, founder-specified brief
+
+> Supersedes every earlier version of this section (the trend-line-pair +
+> by-branch-comparison + category-bar + day-of-week-heatmap layout, and
+> the original "Needs Attention" placement note) — do not build the old
+> version, and do not keep both documented. Four founder decisions locked
+> this build (asked via AskUserQuestion before any code was written):
+> keep the app's existing **light** theme (not the brief's literal "dark
+> charcoal" language — the brief's own "use the existing design system"
+> instruction wins), **no new npm dependencies** (custom SVG charts +
+> CSS/Tailwind transitions, matching this app's zero-chart-library
+> precedent), **keep Needs Attention** (scoped to "All Branches" only —
+> see below), **English-only** (the app has zero i18n infrastructure
+> anywhere else; building real Arabic text for just this one page would
+> be inconsistent — layout still avoids hardcoding assumptions that would
+> obviously break under a future RTL pass, but no translation/toggle
+> exists yet).
+
+**Terminology mapping** (brief's marketing language → real schema entity,
+used consistently in UI copy even though the underlying table names
+differ): "Task Group" = a `tasks` row (a checklist, per the 2026-07-29
+task/task_items schema). "Food Safety Reference" = a `food_safety_standards`
+row.
+
+**No "Overdue" state anywhere** — the schema only has
+`pending`/`completed`/`missed` for tasks and `pending`/`pass`/`fail`/`missed`
+for food safety (the midnight cron flips overdue `pending` → `missed`,
+comanager-logic §4). Every chart/table/KPI that might elsewhere be
+described as tracking "overdue" uses `missed` instead; there is no
+separate overdue concept to build.
+
+**Header**: title "Reports", supporting text "Track task completion and
+food safety performance across your branches." No second summary/repeat
+of the title below it.
+
+**Global filters**, directly below the header:
+- Branch filter (select): "All Branches" (default) + each active branch.
+- Time range filter (pill toggle): **7 Days / 30 Days / 3 Months**
+  (default 30 Days) — replaces the old Day/Week/Month/3-Months toggle.
+  7/30 Days bucket trend charts by day; 3 Months buckets by week (still
+  never raw daily points at that range, per comanager-context Reporting
+  Rules, now updated to reference these three options).
+- Both filters apply to every KPI/chart/table on the page (Needs
+  Attention is the sole, deliberate exception — see below). Changing
+  either preserves the other's current value. No full-page reload; a
+  brief, localized loading state only.
+
+**Needs Attention** — kept from the prior build, but now **only rendered
+when Branch filter = "All Branches"** (its cross-branch "which branch
+needs help today" purpose is moot once one branch is already selected —
+hiding it there avoids showing a redundant single-row list). Otherwise
+unchanged from the original design: underperforming branches (below 80%
+today, comanager-logic §7, branches with nothing due excluded rather than
+flagged at 0%) + unresolved food-safety failures (`result='fail' AND
+acknowledged_at IS NULL`, 30-day window, capped at 5 with "+N more — view
+all"). Positioned directly below the KPI row, above "Tasks Performance".
+Deliberately independent of the time-range filter too (always "today"),
+same reasoning as before.
+
+**Top KPI row** — exactly 4 cards, no more, no fewer:
+1. **Task Completion Rate** — `completed / total` of in-range
+   `task_submissions` (total = every row regardless of status, same
+   BUG#029 denominator convention as the rest of the app), shown as a %,
+   with a percentage-point delta vs. the immediately preceding equivalent
+   window (e.g. 30-Days range compares `[today-59, today-30)` against
+   `[today-29, today]`).
+2. **Food Safety Compliance** — `pass / (pass+fail+missed)` of in-range
+   `food_safety_submissions` (pending excluded from the denominator, same
+   convention the old trend chart already used), same delta pattern.
+3. **Missed Tasks** — raw count of `task_submissions` with
+   `status='missed'` in range (a count, not a rate — replaces the
+   schema-impossible "Overdue Tasks"/"Average Completion Time" cards from
+   the original brief). Delta shown as an absolute count difference
+   ("+3"/"-2"), not a percentage (a % change on a raw count is often
+   undefined/meaningless when the prior period was 0). Warning (red)
+   styling when the count **increased** vs. the prior period; neutral
+   when flat or decreased — ties the "high" warning to trend direction
+   rather than an invented absolute threshold nowhere in the spec.
+4. **Unresolved Food Safety Failures** — count of
+   `food_safety_submissions` with `result='fail' AND acknowledged_at IS
+   NULL` whose `due_date` falls in the selected range (this KPI, unlike
+   Needs Attention, *does* respect the range/branch filters — "all data
+   on the page must match both selected filters" per the brief). Same
+   absolute-delta + trend-direction warning styling as Missed Tasks.
+
+**"Tasks Performance" section** (heading + "See how all operational task
+groups are performing over time."):
+- **Chart 1 — Task Completion Trend**: multi-series line, Completed vs.
+  Missed (no third "Overdue" series — 2 series only), bucketed per the
+  range (day for 7/30 Days, week for 3 Months). Generated one-line insight
+  above/below comparing current-vs-previous-period completion rate (e.g.
+  "Task completion improved by 6% compared with the previous period."),
+  only rendered when both periods have real data to compare.
+- **Chart 2 — Task Group Performance**: horizontal bars, one per active
+  task (scoped by the branch filter via its actual `task_submissions`
+  rows, not by filtering the `tasks` table directly — a global task with
+  no submissions for the filtered branch naturally drops out on its own).
+  Value = completion rate. Default sort: worst-first. A small "Needs
+  attention" / "Best performing" toggle flips the sort direction. Shows
+  the first 8–10 with a "View all" action (opens the full list in the
+  table below, does not horizontally scroll the chart). Clicking a bar
+  highlights the matching table row (does not navigate).
+- **Tasks detail table**: Task Group / Total Tasks / Completed / Missed /
+  Completion Rate. Sortable (default: completion rate ascending),
+  searchable by name, row click opens `ReportDetailsDrawer` (daily
+  history, manager completion records via `submitted_by` → `users.name`,
+  recent missed tasks) — the drawer adds detail, it never just re-renders
+  the chart.
+
+**"Food Safety Performance" section** (heading + "Track compliance across
+all food safety references."):
+- **Chart 3 — Food Safety Compliance Trend**: multi-series line, Passed /
+  Failed / Missed (3 series — these are literally 3 of the 4 real
+  `result` enum values; `pending` is the 4th and isn't graphed, same as
+  it was never graphed before). One generated insight sentence when the
+  data supports it (e.g. naming whichever standard contributed the most
+  fails during a decline).
+- **Chart 4 — Food Safety Reference Performance**: horizontal bars, one
+  per active standard, value = compliance rate, worst-first default,
+  same 8–10 cap + "View all", same bar-click-highlights-table-row
+  behavior as Chart 2.
+- **Food Safety detail table**: Food Safety Reference / Total Inspections
+  / Passed / Failed / Missed / Compliance Rate. Same sortable/searchable/
+  drawer behavior as the Tasks table; drawer may show historical results,
+  recent failed/missed inspections, and `corrective_note`/`photo_url`
+  evidence when present (via the shared `PhotoLightbox`, not a new photo
+  viewer).
+
+**Layout**: desktop — line chart ~65% / bar chart ~35% width per section,
+table full-width below. Tablet — chart pair stacks vertically. Mobile —
+everything stacks, tables become expandable stacked cards, no horizontal
+page scroll.
+
+**States**: skeleton loading (KPI cards, chart shapes, table rows — never
+a blank page); empty state with a clear message + a "change the time
+range" secondary action, distinct copy for "no task groups yet"/"no fs
+references yet" (explaining they'll appear automatically once created —
+never asking the owner to manually add them, per Data Synchronization);
+error state with a Retry action that preserves the current filters.
+
+**Exactly 4 primary charts, no pie/donut/radar/decorative charts, no
+per-task-group or per-standard individual charts** — the two bar charts
+are the only per-entity visualization, and they're capped/paginated via
+the table rather than one chart each.
 
 ### Billing (`/owner/billing`)
 - Current plan card: "50 SAR per branch/month" + feature checklist (2 managers/branch, real-time dashboard, unlimited checklists/logs).
@@ -164,3 +278,4 @@ expanded card, not prefetched for every card on the page.
   - Branch Manager Tasks' expanded completed-item view ("View photo")
   - Branch Manager Food Safety's `ReadingCard` completed-reading view ("View photo")
   Owner Food Safety does not currently show submitted photos anywhere (its "Recent readings" table has no photo column), so there was nothing to convert there.
+- **Side drawer** (added 2026-08-05, `ReportDetailsDrawer` on Reports): the app's first slide-in-from-the-right panel — every existing modal (TaskModal, StandardModal, manager-created confirmation) is a centered overlay, not a drawer. Used for row/bar-click "more detail" on the Reports tables/charts; likely reusable anywhere else a "drill into this one row without leaving the page" need comes up later.

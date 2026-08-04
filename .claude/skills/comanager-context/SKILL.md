@@ -288,10 +288,12 @@ comanager-design skill gets built from them.)*
   muddy browns) across three anchors: red at 0%, yellow at 50%, brand green
   at 100%. **80% is the underperformance threshold** — below it, a branch
   should visually flag as needing attention.
-- **Chart granularity**: the Day/Week/Month/3-Months toggle must change how
-  data is *grouped*, not just the date range. Month and 3-Month views must
-  aggregate (weekly or monthly buckets) — never plot raw daily data points,
-  it's unreadable at that range.
+- **Chart granularity**: the Reports page's time-range toggle — **7 Days /
+  30 Days / 3 Months** (changed 2026-08-05 from the earlier Day/Week/
+  Month/3-Months set during the Reports full rebuild; see
+  comanager-design-match for the current spec) — must change how data is
+  *grouped*, not just the date range. 3 Months must aggregate into weekly
+  buckets — never plot raw daily data points, it's unreadable at that range.
 
 ## Open UX Questions (unresolved — decide before building these screens)
 - ~~Task editing flow~~ — **resolved**, was just stale here: comanager-logic

@@ -11,3 +11,37 @@ body {
     text-wrap: balance;
   }
 }
+
+/* Reports page motion (comanager-design-match: custom CSS transitions, no
+   animation library — subtle page entrance, staggered KPI cards, drawer
+   slide-in). Respects prefers-reduced-motion by disabling entirely rather
+   than just shortening, per the brief's accessibility rules. */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes drawIn {
+  from {
+    stroke-dashoffset: var(--draw-length, 1000);
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

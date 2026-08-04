@@ -3,15 +3,30 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePanelAuthContext } from "@/lib/auth/panel-auth-context";
-import { calcRate, completionBackgroundColor, completionColor, UNDERPERFORMING_THRESHOLD } from "@/lib/utils/completion";
+import { calcRate, completionColor, UNDERPERFORMING_THRESHOLD } from "@/lib/utils/completion";
 import {
   bucketKey,
-  DAY_OF_WEEK_LABELS,
-  rangeStartDate,
+  currentRangeBounds,
+  inRange,
+  previousRangeBounds,
   RANGE_BUCKET,
+  weekKey,
   type ReportRange,
 } from "@/lib/utils/reports";
 import { parseDueDate, riyadhDateString, riyadhDaysAgoString } from "@/lib/utils/riyadh-date";
+import { PhotoLightbox } from "@/components/PhotoLightbox";
+import { ReportsHeader } from "./components/ReportsHeader";
+import { GlobalReportFilters } from "./components/GlobalReportFilters";
+import { MetricCard } from "./components/MetricCard";
+import { ReportSection } from "./components/ReportSection";
+import { TrendLineChart, type TrendSeries } from "./components/TrendLineChart";
+import { PerformanceBarChart, type PerformanceItem } from "./components/PerformanceBarChart";
+import { ReportsDataTable, type TableColumn } from "./components/ReportsDataTable";
+import { ReportDetailsDrawer } from "./components/ReportDetailsDrawer";
+import { InsightMessage } from "./components/InsightMessage";
+import { EmptyState } from "./components/EmptyState";
+import { ErrorState } from "./components/ErrorState";
+import { KpiRowSkeleton, ChartSkeleton } from "./components/LoadingSkeleton";
 
 interface Branch {
   id: string;
@@ -19,54 +34,71 @@ interface Branch {
 }
 interface TaskDef {
   id: string;
+  title: string;
   category: string | null;
 }
 interface TaskSub {
+  id: string;
   task_id: string;
   branch_id: string;
   due_date: string;
-  status: "completed" | "pending" | "missed";
-}
-interface FsSub {
-  branch_id: string;
-  due_date: string;
-  result: "pending" | "pass" | "fail";
+  status: "pending" | "completed" | "missed";
+  submitted_by: string | null;
 }
 interface FsStandard {
   id: string;
   title: string;
 }
-// Unresolved food-safety failures for "Needs Attention" — same definition
-// the Food Safety page's own alert banner already uses (result='fail' AND
-// acknowledged_at IS NULL), fetched independently of the range toggle
-// (comanager-design-match: this section is a fixed "today" snapshot, not
-// scoped by Day/Week/Month/3-Months) over the same 30-day window that
-// page uses, for consistency.
-interface FsAttentionRow {
+interface FsSub {
+  id: string;
+  standard_id: string;
+  branch_id: string;
+  due_date: string;
+  result: "pending" | "pass" | "fail" | "missed";
+  submitted_by: string | null;
+  acknowledged_at: string | null;
+  corrective_note: string | null;
+  photo_url: string | null;
+}
+interface ManagerUser {
+  id: string;
+  name: string;
+}
+interface AttentionFsRow {
   id: string;
   standard_id: string;
   branch_id: string;
   submitted_at: string | null;
 }
 
-const RANGE_LABEL: Record<ReportRange, string> = {
-  day: "Day",
-  week: "Week",
-  month: "Month",
-  "3months": "3 Months",
-};
+type DrawerState = { kind: "task"; taskId: string } | { kind: "fs"; standardId: string } | null;
 
-function LineChart({ points, color }: { points: { key: string; rate: number }[]; color: string }) {
-  if (points.length === 0) return <p className="text-sm text-ink/50">No data in this range yet.</p>;
-  const w = 600;
-  const h = 120;
-  const step = points.length > 1 ? w / (points.length - 1) : 0;
-  const coords = points.map((p, i) => `${i * step},${h - (p.rate / 100) * h}`).join(" ");
-  return (
-    <svg viewBox={`0 0 ${w} ${h}`} className="w-full" preserveAspectRatio="none">
-      <polyline points={coords} fill="none" stroke={color} strokeWidth={2} />
-    </svg>
-  );
+function enumerateDayBuckets(start: string, end: string): string[] {
+  const out: string[] = [];
+  let d = parseDueDate(start);
+  const endTime = parseDueDate(end).getTime();
+  while (d.getTime() <= endTime) {
+    out.push(d.toISOString().slice(0, 10));
+    d = new Date(d.getTime() + 86400000);
+  }
+  return out;
+}
+
+function enumerateWeekBuckets(start: string, end: string): string[] {
+  const seen = new Set<string>();
+  let d = parseDueDate(start);
+  const endTime = parseDueDate(end).getTime();
+  while (d.getTime() <= endTime) {
+    seen.add(weekKey(d.toISOString().slice(0, 10)));
+    d = new Date(d.getTime() + 86400000);
+  }
+  return Array.from(seen).sort();
+}
+
+function formatBucketLabel(key: string, bucket: "day" | "week"): string {
+  const d = parseDueDate(key);
+  const label = d.toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
+  return bucket === "week" ? `Wk of ${label}` : label;
 }
 
 export default function ReportsPage() {
@@ -75,62 +107,77 @@ export default function ReportsPage() {
   const [branches, setBranches] = useState<Branch[]>([]);
   const [tasks, setTasks] = useState<TaskDef[]>([]);
   const [taskSubs, setTaskSubs] = useState<TaskSub[]>([]);
-  const [fsSubs, setFsSubs] = useState<FsSub[]>([]);
-  const [heatmapSubs, setHeatmapSubs] = useState<TaskSub[]>([]);
   const [fsStandards, setFsStandards] = useState<FsStandard[]>([]);
-  const [attentionFsSubs, setAttentionFsSubs] = useState<FsAttentionRow[]>([]);
+  const [fsSubs, setFsSubs] = useState<FsSub[]>([]);
+  const [managers, setManagers] = useState<ManagerUser[]>([]);
+  const [attentionFsSubs, setAttentionFsSubs] = useState<AttentionFsRow[]>([]);
+
   const [dataLoading, setDataLoading] = useState(true);
-  const [range, setRange] = useState<ReportRange>("week");
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [range, setRange] = useState<ReportRange>("30days");
   const [branchFilter, setBranchFilter] = useState<string>("");
-  const [comparisonMode, setComparisonMode] = useState<"completion" | "pass">("completion");
+  const [highlightedTaskId, setHighlightedTaskId] = useState<string | null>(null);
+  const [highlightedFsId, setHighlightedFsId] = useState<string | null>(null);
+  const [drawer, setDrawer] = useState<DrawerState>(null);
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
   const loadData = useCallback(
     async (currentRange: ReportRange) => {
       setDataLoading(true);
-      const since = rangeStartDate(currentRange);
-      const tenWeeksAgo = riyadhDaysAgoString(70);
-      // Needs Attention is a fixed "today" snapshot, independent of the
-      // range toggle (founder-confirmed) — the fs-failures half still
-      // needs its own bounded window (a fail can be days old and still
-      // unresolved), matching the Food Safety page's own 30-day window
-      // for its identical alert banner, for consistency.
+      setLoadError(null);
+      const prevBounds = previousRangeBounds(currentRange);
       const thirtyDaysAgo = riyadhDaysAgoString(29);
+      const earliestNeeded = prevBounds.start < thirtyDaysAgo ? prevBounds.start : thirtyDaysAgo;
 
-      const [
-        { data: branchData },
-        { data: taskData },
-        { data: taskSubData },
-        { data: fsSubData },
-        { data: heatmapData },
-        { data: fsStandardData },
-        { data: attentionFsData },
-      ] = await Promise.all([
-        client.from("branches").select("id, name").eq("is_active", true).order("name"),
-        client.from("tasks").select("id, category"),
-        client.from("task_submissions").select("task_id, branch_id, due_date, status").gte("due_date", since),
-        client.from("food_safety_submissions").select("branch_id, due_date, result").gte("due_date", since),
-        client
-          .from("task_submissions")
-          .select("task_id, branch_id, due_date, status")
-          .gte("due_date", tenWeeksAgo),
-        client.from("food_safety_standards").select("id, title"),
-        client
+      try {
+        const [
+          { data: branchData, error: branchErr },
+          { data: taskData, error: taskErr },
+          { data: taskSubData, error: taskSubErr },
+          { data: fsStandardData, error: fsStandardErr },
+          { data: fsSubData, error: fsSubErr },
+          { data: managerData, error: managerErr },
+        ] = await Promise.all([
+          client.from("branches").select("id, name").eq("is_active", true).order("name"),
+          client.from("tasks").select("id, title, category"),
+          client
+            .from("task_submissions")
+            .select("id, task_id, branch_id, due_date, status, submitted_by")
+            .gte("due_date", earliestNeeded),
+          client.from("food_safety_standards").select("id, title"),
+          client
+            .from("food_safety_submissions")
+            .select("id, standard_id, branch_id, due_date, result, submitted_by, acknowledged_at, corrective_note, photo_url")
+            .gte("due_date", earliestNeeded),
+          client.from("users").select("id, name").eq("role", "branch_manager"),
+        ]);
+
+        const firstError = branchErr || taskErr || taskSubErr || fsStandardErr || fsSubErr || managerErr;
+        if (firstError) throw firstError;
+
+        // Needs Attention's fs-failures half is independent of the range
+        // toggle (comanager-design-match) — separate, always-30-day query.
+        const { data: attentionFsData, error: attentionErr } = await client
           .from("food_safety_submissions")
           .select("id, standard_id, branch_id, submitted_at")
           .eq("result", "fail")
           .is("acknowledged_at", null)
           .gte("due_date", thirtyDaysAgo)
-          .order("submitted_at", { ascending: false }),
-      ]);
+          .order("submitted_at", { ascending: false });
+        if (attentionErr) throw attentionErr;
 
-      setBranches(branchData ?? []);
-      setTasks(taskData ?? []);
-      setTaskSubs(taskSubData ?? []);
-      setFsStandards(fsStandardData ?? []);
-      setAttentionFsSubs(attentionFsData ?? []);
-      setFsSubs(fsSubData ?? []);
-      setHeatmapSubs(heatmapData ?? []);
-      setDataLoading(false);
+        setBranches(branchData ?? []);
+        setTasks(taskData ?? []);
+        setTaskSubs(taskSubData ?? []);
+        setFsStandards(fsStandardData ?? []);
+        setFsSubs(fsSubData ?? []);
+        setManagers(managerData ?? []);
+        setAttentionFsSubs(attentionFsData ?? []);
+      } catch (err) {
+        setLoadError(err instanceof Error ? err.message : "Something went wrong loading reports.");
+      } finally {
+        setDataLoading(false);
+      }
     },
     [client],
   );
@@ -143,16 +190,58 @@ export default function ReportsPage() {
     return <main className="p-8 text-sm text-ink/60">Loading...</main>;
   }
 
-  const scopedTaskSubs = branchFilter ? taskSubs.filter((s) => s.branch_id === branchFilter) : taskSubs;
-  const scopedFsSubs = branchFilter ? fsSubs.filter((s) => s.branch_id === branchFilter) : fsSubs;
-  const bucket = RANGE_BUCKET[range];
+  if (loadError) {
+    return (
+      <main className="p-8">
+        <ReportsHeader />
+        <div className="mt-6">
+          <ErrorState message={`Couldn't load reports: ${loadError}`} onRetry={() => loadData(range)} />
+        </div>
+      </main>
+    );
+  }
 
-  // Needs Attention (comanager-logic §7, comanager-design-match) —
-  // deliberately built from the FULL (unfiltered) taskSubs/branches, not
-  // scopedTaskSubs/branchFilter: this section always shows every branch
-  // that needs attention today, independent of both the range toggle and
-  // the branch filter dropdown below it — those control the charts, this
-  // is a fixed "what needs your attention right now" snapshot.
+  const bounds = currentRangeBounds(range);
+  const prevBounds = previousRangeBounds(range);
+  const bucket = RANGE_BUCKET[range];
+  const managerNameById = new Map(managers.map((m) => [m.id, m.name]));
+  const branchNameById = new Map(branches.map((b) => [b.id, b.name]));
+  const taskById = new Map(tasks.map((t) => [t.id, t]));
+  const standardById = new Map(fsStandards.map((s) => [s.id, s]));
+
+  const branchScoped = <T extends { branch_id: string }>(rows: T[]) =>
+    branchFilter ? rows.filter((r) => r.branch_id === branchFilter) : rows;
+
+  const currentTaskSubs = branchScoped(taskSubs.filter((s) => inRange(s.due_date, bounds)));
+  const prevTaskSubs = branchScoped(taskSubs.filter((s) => inRange(s.due_date, prevBounds)));
+  const currentFsSubs = branchScoped(fsSubs.filter((s) => inRange(s.due_date, bounds)));
+  const prevFsSubs = branchScoped(fsSubs.filter((s) => inRange(s.due_date, prevBounds)));
+
+  // ---------- KPI 1: Task Completion Rate ----------
+  const currentCompletionRate = calcRate(currentTaskSubs.filter((s) => s.status === "completed").length, currentTaskSubs.length);
+  const prevCompletionRate = calcRate(prevTaskSubs.filter((s) => s.status === "completed").length, prevTaskSubs.length);
+  const completionDelta = prevTaskSubs.length > 0 ? currentCompletionRate - prevCompletionRate : null;
+
+  // ---------- KPI 2: Food Safety Compliance ----------
+  const fsDenominator = (rows: FsSub[]) => rows.filter((s) => s.result !== "pending");
+  const currentFsResolved = fsDenominator(currentFsSubs);
+  const prevFsResolved = fsDenominator(prevFsSubs);
+  const currentComplianceRate = calcRate(currentFsResolved.filter((s) => s.result === "pass").length, currentFsResolved.length);
+  const prevComplianceRate = calcRate(prevFsResolved.filter((s) => s.result === "pass").length, prevFsResolved.length);
+  const complianceDelta = prevFsResolved.length > 0 ? currentComplianceRate - prevComplianceRate : null;
+
+  // ---------- KPI 3: Missed Tasks (raw count) ----------
+  const currentMissedCount = currentTaskSubs.filter((s) => s.status === "missed").length;
+  const prevMissedCount = prevTaskSubs.filter((s) => s.status === "missed").length;
+  const missedDelta = prevTaskSubs.length > 0 ? currentMissedCount - prevMissedCount : null;
+
+  // ---------- KPI 4: Unresolved Food Safety Failures (range-scoped) ----------
+  const unresolvedInRange = (rows: FsSub[]) => rows.filter((s) => s.result === "fail" && !s.acknowledged_at);
+  const currentUnresolvedCount = unresolvedInRange(currentFsSubs).length;
+  const prevUnresolvedCount = unresolvedInRange(prevFsSubs).length;
+  const unresolvedDelta = prevFsSubs.length > 0 ? currentUnresolvedCount - prevUnresolvedCount : null;
+
+  // ---------- Needs Attention (today, all branches, independent of filters) ----------
   const today = riyadhDateString();
   const todaysTaskSubs = taskSubs.filter((s) => s.due_date === today);
   const underperformingBranches = branches
@@ -161,19 +250,12 @@ export default function ReportsPage() {
       const completed = rows.filter((s) => s.status === "completed").length;
       return { branch: b, completed, total: rows.length, rate: calcRate(completed, rows.length) };
     })
-    // A branch with zero submissions today has nothing due yet, not a
-    // real underperformance — calcRate(0,0) returning 0 would otherwise
-    // wrongly flag every brand-new/quiet branch (same reasoning as
-    // BUG#029: a rate's denominator must be real submission rows).
     .filter((s) => s.total > 0 && s.rate < UNDERPERFORMING_THRESHOLD)
     .sort((a, b) => a.rate - b.rate);
-
-  const standardTitleById = new Map(fsStandards.map((s) => [s.id, s.title]));
-  const branchNameById = new Map(branches.map((b) => [b.id, b.name]));
   const ATTENTION_FS_LIMIT = 5;
   const unresolvedFsFailures = attentionFsSubs.slice(0, ATTENTION_FS_LIMIT).map((f) => ({
     id: f.id,
-    standardTitle: standardTitleById.get(f.standard_id) ?? "Standard",
+    standardTitle: standardById.get(f.standard_id)?.title ?? "Standard",
     branchName: branchNameById.get(f.branch_id) ?? "Branch",
     submittedAt: f.submitted_at,
   }));
@@ -184,264 +266,443 @@ export default function ReportsPage() {
     return new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   }
 
-  // Completion rate trend
-  const completionBuckets = new Map<string, { completed: number; total: number }>();
-  scopedTaskSubs.forEach((s) => {
+  // ---------- Chart 1: Task Completion Trend ----------
+  const dayOrWeekBuckets = bucket === "day" ? enumerateDayBuckets(bounds.start, bounds.end) : enumerateWeekBuckets(bounds.start, bounds.end);
+  const taskTrendMap = new Map<string, { completed: number; missed: number }>();
+  dayOrWeekBuckets.forEach((k) => taskTrendMap.set(k, { completed: 0, missed: 0 }));
+  currentTaskSubs.forEach((s) => {
     const key = bucketKey(s.due_date, bucket);
-    const b = completionBuckets.get(key) ?? { completed: 0, total: 0 };
-    b.total += 1;
-    if (s.status === "completed") b.completed += 1;
-    completionBuckets.set(key, b);
+    const entry = taskTrendMap.get(key);
+    if (!entry) return;
+    if (s.status === "completed") entry.completed += 1;
+    if (s.status === "missed") entry.missed += 1;
   });
-  const completionTrend = Array.from(completionBuckets.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([key, v]) => ({ key, rate: calcRate(v.completed, v.total) }));
+  const taskTrendLabels = dayOrWeekBuckets.map((k) => formatBucketLabel(k, bucket));
+  const taskTrendSeries: TrendSeries[] = [
+    { id: "completed", label: "Completed", color: "#37B788", values: dayOrWeekBuckets.map((k) => taskTrendMap.get(k)!.completed) },
+    { id: "missed", label: "Missed", color: "#E8697C", values: dayOrWeekBuckets.map((k) => taskTrendMap.get(k)!.missed) },
+  ];
+  const taskTrendInsight =
+    prevTaskSubs.length > 0 && currentTaskSubs.length > 0 && completionDelta !== null && Math.abs(completionDelta) >= 1
+      ? `Task completion ${completionDelta > 0 ? "improved" : "declined"} by ${Math.abs(Math.round(completionDelta))}% compared with the previous period.`
+      : null;
 
-  // Food-safety pass rate trend
-  const passBuckets = new Map<string, { pass: number; total: number }>();
-  scopedFsSubs
-    .filter((s) => s.result !== "pending")
-    .forEach((s) => {
-      const key = bucketKey(s.due_date, bucket);
-      const b = passBuckets.get(key) ?? { pass: 0, total: 0 };
-      b.total += 1;
-      if (s.result === "pass") b.pass += 1;
-      passBuckets.set(key, b);
-    });
-  const passTrend = Array.from(passBuckets.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([key, v]) => ({ key, rate: calcRate(v.pass, v.total) }));
-
-  // By-branch comparison
-  const branchComparison = branches.map((b) => {
-    if (comparisonMode === "completion") {
-      const rows = taskSubs.filter((s) => s.branch_id === b.id);
+  // ---------- Chart 2 + table: Task Group Performance ----------
+  const taskPerformance: PerformanceItem[] = Array.from(new Set(currentTaskSubs.map((s) => s.task_id)))
+    .map((taskId) => {
+      const rows = currentTaskSubs.filter((s) => s.task_id === taskId);
       const completed = rows.filter((s) => s.status === "completed").length;
-      return { branch: b.name, rate: calcRate(completed, rows.length) };
+      const missed = rows.filter((s) => s.status === "missed").length;
+      return {
+        id: taskId,
+        label: taskById.get(taskId)?.title ?? "Task",
+        rate: calcRate(completed, rows.length),
+        primaryCount: completed,
+        secondaryCount: missed,
+        primaryLabel: "Completed",
+        secondaryLabel: "Missed",
+        total: rows.length,
+      };
+    })
+    .sort((a, b) => a.rate - b.rate);
+
+  // ---------- Chart 3: Food Safety Compliance Trend ----------
+  const fsTrendMap = new Map<string, { pass: number; fail: number; missed: number }>();
+  dayOrWeekBuckets.forEach((k) => fsTrendMap.set(k, { pass: 0, fail: 0, missed: 0 }));
+  currentFsSubs.forEach((s) => {
+    const key = bucketKey(s.due_date, bucket);
+    const entry = fsTrendMap.get(key);
+    if (!entry) return;
+    if (s.result === "pass") entry.pass += 1;
+    if (s.result === "fail") entry.fail += 1;
+    if (s.result === "missed") entry.missed += 1;
+  });
+  const fsTrendSeries: TrendSeries[] = [
+    { id: "pass", label: "Passed", color: "#37B788", values: dayOrWeekBuckets.map((k) => fsTrendMap.get(k)!.pass) },
+    { id: "fail", label: "Failed", color: "#E8697C", values: dayOrWeekBuckets.map((k) => fsTrendMap.get(k)!.fail) },
+    { id: "missed", label: "Missed", color: "#E0A23B", values: dayOrWeekBuckets.map((k) => fsTrendMap.get(k)!.missed) },
+  ];
+  let fsTrendInsight: string | null = null;
+  if (prevFsResolved.length > 0 && currentFsResolved.length > 0 && complianceDelta !== null && Math.abs(complianceDelta) >= 1) {
+    if (complianceDelta < 0) {
+      const failCounts = new Map<string, number>();
+      currentFsSubs.filter((s) => s.result === "fail").forEach((s) => failCounts.set(s.standard_id, (failCounts.get(s.standard_id) ?? 0) + 1));
+      const worst = Array.from(failCounts.entries()).sort((a, b) => b[1] - a[1])[0];
+      const worstName = worst ? (standardById.get(worst[0])?.title ?? "a standard") : null;
+      fsTrendInsight = worstName
+        ? `Food safety compliance decreased by ${Math.abs(Math.round(complianceDelta))}% because of failed ${worstName} checks.`
+        : `Food safety compliance decreased by ${Math.abs(Math.round(complianceDelta))}% compared with the previous period.`;
+    } else {
+      fsTrendInsight = `Food safety compliance improved by ${Math.round(complianceDelta)}% compared with the previous period.`;
     }
-    const rows = fsSubs.filter((s) => s.branch_id === b.id && s.result !== "pending");
-    const pass = rows.filter((s) => s.result === "pass").length;
-    return { branch: b.name, rate: calcRate(pass, rows.length) };
-  });
+  }
 
-  // Completion by category
-  const categoryOf = new Map(tasks.map((t) => [t.id, t.category ?? "Uncategorized"]));
-  const categoryBuckets = new Map<string, { completed: number; total: number }>();
-  scopedTaskSubs.forEach((s) => {
-    const cat = categoryOf.get(s.task_id) ?? "Uncategorized";
-    const b = categoryBuckets.get(cat) ?? { completed: 0, total: 0 };
-    b.total += 1;
-    if (s.status === "completed") b.completed += 1;
-    categoryBuckets.set(cat, b);
-  });
-  const categoryRates = Array.from(categoryBuckets.entries()).map(([cat, v]) => ({
-    category: cat,
-    rate: calcRate(v.completed, v.total),
-  }));
+  // ---------- Chart 4 + table: Food Safety Reference Performance ----------
+  const fsPerformance: PerformanceItem[] = Array.from(new Set(currentFsSubs.map((s) => s.standard_id)))
+    .map((standardId) => {
+      const rows = fsDenominator(currentFsSubs.filter((s) => s.standard_id === standardId));
+      const pass = rows.filter((s) => s.result === "pass").length;
+      const fail = rows.filter((s) => s.result === "fail").length;
+      return {
+        id: standardId,
+        label: standardById.get(standardId)?.title ?? "Standard",
+        rate: calcRate(pass, rows.length),
+        primaryCount: pass,
+        secondaryCount: fail,
+        primaryLabel: "Passed",
+        secondaryLabel: "Failed",
+        total: rows.length,
+      };
+    })
+    .sort((a, b) => a.rate - b.rate);
 
-  // Day-of-week heatmap: last 10 weeks, rows = weeks, columns = day-of-week
-  const scopedHeatmap = branchFilter ? heatmapSubs.filter((s) => s.branch_id === branchFilter) : heatmapSubs;
-  const dayBuckets = new Map<string, { completed: number; total: number }>(); // key: "weekIndex-dow"
-  // Anchored to Riyadh's current calendar day (UTC midnight of that date),
-  // not the raw current instant — comparing against d (also UTC midnight
-  // of its due_date) keeps every diff a whole number of days, avoiding any
-  // partial-day drift from whatever time of day "now" happens to be.
-  // getUTCDay() (not getDay()) keeps the day-of-week independent of the
-  // viewer's own browser timezone (audit finding, 2026-07-30).
-  const todayUtcMidnight = parseDueDate(riyadhDateString());
-  scopedHeatmap.forEach((s) => {
-    const d = parseDueDate(s.due_date);
-    const weeksAgo = Math.floor((todayUtcMidnight.getTime() - d.getTime()) / (7 * 24 * 60 * 60 * 1000));
-    if (weeksAgo < 0 || weeksAgo >= 10) return;
-    const key = `${9 - weeksAgo}-${d.getUTCDay()}`;
-    const b = dayBuckets.get(key) ?? { completed: 0, total: 0 };
-    b.total += 1;
-    if (s.status === "completed") b.completed += 1;
-    dayBuckets.set(key, b);
-  });
+  // ---------- Table columns ----------
+  const taskColumns: TableColumn<(typeof taskPerformance)[number]>[] = [
+    { key: "label", label: "Task Group", sortValue: (r) => r.label, render: (r) => <span className="font-bold">{r.label}</span> },
+    { key: "total", label: "Total Tasks", align: "right", sortValue: (r) => r.total, render: (r) => r.total },
+    { key: "completed", label: "Completed", align: "right", sortValue: (r) => r.primaryCount, render: (r) => r.primaryCount },
+    { key: "missed", label: "Missed", align: "right", sortValue: (r) => r.secondaryCount, render: (r) => r.secondaryCount },
+    {
+      key: "rate",
+      label: "Completion Rate",
+      align: "right",
+      sortValue: (r) => r.rate,
+      render: (r) => (
+        <span className="font-mono" style={{ color: completionColor(r.rate) }}>
+          {r.rate}%
+        </span>
+      ),
+    },
+  ];
+
+  const fsColumns: TableColumn<(typeof fsPerformance)[number]>[] = [
+    { key: "label", label: "Food Safety Reference", sortValue: (r) => r.label, render: (r) => <span className="font-bold">{r.label}</span> },
+    { key: "total", label: "Total Inspections", align: "right", sortValue: (r) => r.total, render: (r) => r.total },
+    { key: "passed", label: "Passed", align: "right", sortValue: (r) => r.primaryCount, render: (r) => r.primaryCount },
+    { key: "failed", label: "Failed", align: "right", sortValue: (r) => r.secondaryCount, render: (r) => r.secondaryCount },
+    {
+      key: "missed",
+      label: "Missed",
+      align: "right",
+      sortValue: (r) => currentFsSubs.filter((s) => s.standard_id === r.id && s.result === "missed").length,
+      render: (r) => currentFsSubs.filter((s) => s.standard_id === r.id && s.result === "missed").length,
+    },
+    {
+      key: "rate",
+      label: "Compliance Rate",
+      align: "right",
+      sortValue: (r) => r.rate,
+      render: (r) => (
+        <span className="font-mono" style={{ color: completionColor(r.rate) }}>
+          {r.rate}%
+        </span>
+      ),
+    },
+  ];
+
+  // ---------- Drawer content ----------
+  const drawerTaskRows =
+    drawer?.kind === "task"
+      ? currentTaskSubs
+          .filter((s) => s.task_id === drawer.taskId)
+          .sort((a, b) => b.due_date.localeCompare(a.due_date))
+      : [];
+  const drawerFsRows =
+    drawer?.kind === "fs"
+      ? currentFsSubs
+          .filter((s) => s.standard_id === drawer.standardId)
+          .sort((a, b) => b.due_date.localeCompare(a.due_date))
+      : [];
 
   return (
     <main className="p-8">
-      <h1 className="font-display text-2xl">Reports</h1>
+      <ReportsHeader />
+      <GlobalReportFilters
+        branches={branches}
+        branchFilter={branchFilter}
+        onBranchFilterChange={setBranchFilter}
+        range={range}
+        onRangeChange={setRange}
+      />
 
-      {!dataLoading && (
-        <div className="mt-4">
-          <h2 className="font-display text-sm">Needs Attention</h2>
-          {underperformingBranches.length === 0 && unresolvedFsFailures.length === 0 ? (
-            <p className="mt-2 rounded-lg bg-success/16 p-3 text-sm text-success-ink">
-              Nothing needs attention today.
-            </p>
-          ) : (
-            <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {underperformingBranches.map(({ branch, rate, completed, total }) => (
-                <button
-                  key={branch.id}
-                  type="button"
-                  onClick={() => setBranchFilter(branch.id)}
-                  className="rounded-lg border-l-4 border-red bg-card p-4 text-left shadow-sm"
-                >
-                  <p className="font-display text-sm font-bold">{branch.name}</p>
-                  <p className="mt-1 font-mono text-xs font-bold" style={{ color: completionColor(rate) }}>
-                    {rate}% completion today
-                  </p>
-                  <p className="mt-0.5 text-[11px] text-ink/50">
-                    {completed}/{total} tasks done
-                  </p>
-                </button>
-              ))}
-              {unresolvedFsFailures.map((f) => (
-                <Link
-                  key={f.id}
-                  href="/owner/food-safety"
-                  className="rounded-lg border-l-4 border-red bg-card p-4 shadow-sm"
-                >
-                  <p className="font-display text-sm font-bold">{f.standardTitle}</p>
-                  <p className="mt-1 text-xs text-ink/70">{f.branchName}</p>
-                  <p className="mt-0.5 text-[11px] text-ink/50">{formatAttentionTime(f.submittedAt)}</p>
-                </Link>
-              ))}
-              {hiddenFsFailureCount > 0 && (
-                <Link
-                  href="/owner/food-safety"
-                  className="flex items-center justify-center rounded-lg border-l-4 border-ink/20 bg-card p-4 text-sm text-ink/60 shadow-sm"
-                >
-                  +{hiddenFsFailureCount} more unresolved — view all
-                </Link>
+      {dataLoading ? (
+        <div className="mt-6 flex flex-col gap-6">
+          <KpiRowSkeleton />
+          <ChartSkeleton />
+          <ChartSkeleton />
+        </div>
+      ) : (
+        <>
+          {/* Needs Attention — All Branches only (comanager-design-match) */}
+          {!branchFilter && (
+            <div className="mt-6 animate-[fadeIn_.3s_ease-out]">
+              <h2 className="font-display text-sm">Needs Attention</h2>
+              {underperformingBranches.length === 0 && unresolvedFsFailures.length === 0 ? (
+                <p className="mt-2 rounded-lg bg-success/16 p-3 text-sm text-success-ink">Nothing needs attention today.</p>
+              ) : (
+                <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {underperformingBranches.map(({ branch, rate, completed, total }) => (
+                    <button
+                      key={branch.id}
+                      type="button"
+                      onClick={() => setBranchFilter(branch.id)}
+                      className="min-h-[44px] rounded-lg border-l-4 border-red bg-card p-4 text-left shadow-sm transition-shadow duration-150 hover:shadow-md"
+                    >
+                      <p className="font-display text-sm font-bold">{branch.name}</p>
+                      <p className="mt-1 font-mono text-xs font-bold" style={{ color: completionColor(rate) }}>
+                        {rate}% completion today
+                      </p>
+                      <p className="mt-0.5 text-[11px] text-ink/50">
+                        {completed}/{total} tasks done
+                      </p>
+                    </button>
+                  ))}
+                  {unresolvedFsFailures.map((f) => (
+                    <Link
+                      key={f.id}
+                      href="/owner/food-safety"
+                      className="min-h-[44px] rounded-lg border-l-4 border-red bg-card p-4 shadow-sm transition-shadow duration-150 hover:shadow-md"
+                    >
+                      <p className="font-display text-sm font-bold">{f.standardTitle}</p>
+                      <p className="mt-1 text-xs text-ink/70">{f.branchName}</p>
+                      <p className="mt-0.5 text-[11px] text-ink/50">{formatAttentionTime(f.submittedAt)}</p>
+                    </Link>
+                  ))}
+                  {hiddenFsFailureCount > 0 && (
+                    <Link
+                      href="/owner/food-safety"
+                      className="flex min-h-[44px] items-center justify-center rounded-lg border-l-4 border-ink/20 bg-card p-4 text-sm text-ink/60 shadow-sm"
+                    >
+                      +{hiddenFsFailureCount} more unresolved — view all
+                    </Link>
+                  )}
+                </div>
               )}
             </div>
           )}
-        </div>
-      )}
 
-      <div className="mt-4 flex flex-wrap items-center gap-3">
-        <select
-          value={branchFilter}
-          onChange={(e) => setBranchFilter(e.target.value)}
-          className="rounded border p-2 text-sm"
-        >
-          <option value="">All branches</option>
-          {branches.map((b) => (
-            <option key={b.id} value={b.id}>
-              {b.name}
-            </option>
-          ))}
-        </select>
-        <div className="flex gap-1 rounded-pill bg-cream p-1 text-xs">
-          {(Object.keys(RANGE_LABEL) as ReportRange[]).map((r) => (
-            <button
-              key={r}
-              onClick={() => setRange(r)}
-              className={`rounded-pill px-3 py-1 ${range === r ? "bg-card shadow-sm" : ""}`}
-            >
-              {RANGE_LABEL[r]}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {dataLoading ? (
-        <p className="mt-6 text-sm text-ink/60">Loading...</p>
-      ) : (
-        <>
-          <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <div className="rounded-lg bg-card p-4 shadow-sm">
-              <h2 className="font-display text-sm">Completion rate</h2>
-              <div className="mt-2">
-                <LineChart points={completionTrend} color={completionColor(80)} />
-              </div>
-            </div>
-            <div className="rounded-lg bg-card p-4 shadow-sm">
-              <h2 className="font-display text-sm">Food-safety pass rate</h2>
-              <div className="mt-2">
-                <LineChart points={passTrend} color={completionColor(90)} />
-              </div>
-            </div>
+          {/* KPI row */}
+          <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <MetricCard
+              label="Task Completion Rate"
+              value={currentCompletionRate}
+              format={(n) => `${Math.round(n)}%`}
+              delta={completionDelta}
+              deltaFormat={(n) => `${Math.abs(Math.round(n * 10) / 10)}%`}
+              deltaGoodDirection="up"
+            />
+            <MetricCard
+              label="Food Safety Compliance"
+              value={currentComplianceRate}
+              format={(n) => `${Math.round(n)}%`}
+              delta={complianceDelta}
+              deltaFormat={(n) => `${Math.abs(Math.round(n * 10) / 10)}%`}
+              deltaGoodDirection="up"
+            />
+            <MetricCard
+              label="Missed Tasks"
+              value={currentMissedCount}
+              format={(n) => `${Math.round(n)}`}
+              delta={missedDelta}
+              deltaFormat={(n) => `${Math.abs(Math.round(n))}`}
+              deltaGoodDirection="down"
+            />
+            <MetricCard
+              label="Unresolved Food Safety Failures"
+              value={currentUnresolvedCount}
+              format={(n) => `${Math.round(n)}`}
+              delta={unresolvedDelta}
+              deltaFormat={(n) => `${Math.abs(Math.round(n))}`}
+              deltaGoodDirection="down"
+            />
           </div>
 
-          <div className="mt-4 rounded-lg bg-card p-4 shadow-sm">
-            <div className="flex items-center justify-between">
-              <h2 className="font-display text-sm">By-branch comparison</h2>
-              <div className="flex gap-1 rounded-pill bg-cream p-1 text-xs">
-                <button
-                  onClick={() => setComparisonMode("completion")}
-                  className={`rounded-pill px-3 py-1 ${comparisonMode === "completion" ? "bg-card shadow-sm" : ""}`}
-                >
-                  Completion %
-                </button>
-                <button
-                  onClick={() => setComparisonMode("pass")}
-                  className={`rounded-pill px-3 py-1 ${comparisonMode === "pass" ? "bg-card shadow-sm" : ""}`}
-                >
-                  Pass rate %
-                </button>
-              </div>
-            </div>
-            <div className="mt-3 flex flex-col gap-2">
-              {branchComparison.map((b) => (
-                <div key={b.branch} className="flex items-center gap-2">
-                  <span className="w-32 truncate text-sm">{b.branch}</span>
-                  <div className="h-3 flex-1 rounded-pill bg-ink/10">
-                    <div
-                      className="h-3 rounded-pill"
-                      style={{ width: `${b.rate}%`, backgroundColor: completionColor(b.rate) }}
-                    />
-                  </div>
-                  <span
-                    className="w-12 text-right font-mono text-xs"
-                    style={{ color: b.rate < UNDERPERFORMING_THRESHOLD ? completionColor(b.rate) : undefined }}
-                  >
-                    {b.rate}%
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="mt-4 rounded-lg bg-card p-4 shadow-sm">
-            <h2 className="font-display text-sm">Completion by task category</h2>
-            <div className="mt-3 flex flex-col gap-2">
-              {categoryRates.map((c) => (
-                <div key={c.category} className="flex items-center gap-2">
-                  <span className="w-32 truncate text-sm">{c.category}</span>
-                  <div className="h-3 flex-1 rounded-pill bg-ink/10">
-                    <div
-                      className="h-3 rounded-pill"
-                      style={{ width: `${c.rate}%`, backgroundColor: completionColor(c.rate) }}
-                    />
-                  </div>
-                  <span className="w-12 text-right font-mono text-xs">{c.rate}%</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="mt-4 rounded-lg bg-card p-4 shadow-sm">
-            <h2 className="font-display text-sm">Day-of-week pattern (last 10 weeks)</h2>
-            <div className="mt-3 flex gap-1">
-              {DAY_OF_WEEK_LABELS.map((label, dow) => (
-                <div key={label} className="flex flex-1 flex-col items-center gap-1">
-                  <span className="text-[10px] text-ink/50">{label}</span>
-                  {Array.from({ length: 10 }).map((_, week) => {
-                    const cell = dayBuckets.get(`${week}-${dow}`);
-                    const rate = cell ? calcRate(cell.completed, cell.total) : null;
-                    return (
-                      <div
-                        key={week}
-                        className="h-4 w-full rounded-sm"
-                        style={{
-                          backgroundColor: rate === null ? undefined : completionBackgroundColor(rate),
-                          border: rate === null ? "1px solid rgba(0,0,0,0.05)" : undefined,
-                        }}
-                        title={rate === null ? "No data" : `${rate}%`}
+          {/* Tasks Performance */}
+          <ReportSection title="Tasks Performance" supportingText="See how all operational task groups are performing over time.">
+            {currentTaskSubs.length === 0 ? (
+              <EmptyState
+                message={
+                  tasks.length === 0
+                    ? "No report data is available for this branch and time range. Task Groups created in Tasks will appear here automatically."
+                    : "No report data is available for this branch and time range."
+                }
+                actionLabel="View 3 Months instead"
+                onAction={() => setRange("3months")}
+              />
+            ) : (
+              <>
+                <div className="flex flex-col gap-4 lg:flex-row">
+                  <div className="rounded-lg bg-card p-4 shadow-sm lg:w-[65%]">
+                    <h3 className="font-display text-sm">Task Completion Trend</h3>
+                    <InsightMessage text={taskTrendInsight} />
+                    <div className="mt-3">
+                      <TrendLineChart
+                        labels={taskTrendLabels}
+                        series={taskTrendSeries}
+                        ariaSummary={`Task completion trend: ${Math.round(currentCompletionRate)}% completed over the selected period.`}
                       />
-                    );
-                  })}
+                    </div>
+                  </div>
+                  <div className="rounded-lg bg-card p-4 shadow-sm lg:w-[35%]">
+                    <h3 className="font-display text-sm">Task Group Performance</h3>
+                    <div className="mt-3">
+                      <PerformanceBarChart
+                        items={taskPerformance}
+                        highlightedId={highlightedTaskId}
+                        onItemClick={(id) => setHighlightedTaskId(id)}
+                        onViewAll={() => document.getElementById("tasks-table")?.scrollIntoView({ behavior: "smooth" })}
+                      />
+                    </div>
+                  </div>
                 </div>
-              ))}
-            </div>
-          </div>
+
+                <div id="tasks-table" className="rounded-lg bg-card p-4 shadow-sm">
+                  <ReportsDataTable
+                    columns={taskColumns}
+                    rows={taskPerformance}
+                    getRowId={(r) => r.id}
+                    getRowName={(r) => r.label}
+                    defaultSortKey="rate"
+                    searchPlaceholder="Search task groups..."
+                    onRowClick={(r) => {
+                      setHighlightedTaskId(r.id);
+                      setDrawer({ kind: "task", taskId: r.id });
+                    }}
+                    highlightedId={highlightedTaskId}
+                  />
+                </div>
+              </>
+            )}
+          </ReportSection>
+
+          {/* Food Safety Performance */}
+          <ReportSection title="Food Safety Performance" supportingText="Track compliance across all food safety references.">
+            {currentFsSubs.length === 0 ? (
+              <EmptyState
+                message={
+                  fsStandards.length === 0
+                    ? "No report data is available for this branch and time range. References created in Food Safety will appear here automatically."
+                    : "No report data is available for this branch and time range."
+                }
+                actionLabel="View 3 Months instead"
+                onAction={() => setRange("3months")}
+              />
+            ) : (
+              <>
+                <div className="flex flex-col gap-4 lg:flex-row">
+                  <div className="rounded-lg bg-card p-4 shadow-sm lg:w-[65%]">
+                    <h3 className="font-display text-sm">Food Safety Compliance Trend</h3>
+                    <InsightMessage text={fsTrendInsight} />
+                    <div className="mt-3">
+                      <TrendLineChart
+                        labels={taskTrendLabels}
+                        series={fsTrendSeries}
+                        ariaSummary={`Food safety compliance trend: ${Math.round(currentComplianceRate)}% compliant over the selected period.`}
+                      />
+                    </div>
+                  </div>
+                  <div className="rounded-lg bg-card p-4 shadow-sm lg:w-[35%]">
+                    <h3 className="font-display text-sm">Food Safety Reference Performance</h3>
+                    <div className="mt-3">
+                      <PerformanceBarChart
+                        items={fsPerformance}
+                        highlightedId={highlightedFsId}
+                        onItemClick={(id) => setHighlightedFsId(id)}
+                        onViewAll={() => document.getElementById("fs-table")?.scrollIntoView({ behavior: "smooth" })}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div id="fs-table" className="rounded-lg bg-card p-4 shadow-sm">
+                  <ReportsDataTable
+                    columns={fsColumns}
+                    rows={fsPerformance}
+                    getRowId={(r) => r.id}
+                    getRowName={(r) => r.label}
+                    defaultSortKey="rate"
+                    searchPlaceholder="Search food safety references..."
+                    onRowClick={(r) => {
+                      setHighlightedFsId(r.id);
+                      setDrawer({ kind: "fs", standardId: r.id });
+                    }}
+                    highlightedId={highlightedFsId}
+                  />
+                </div>
+              </>
+            )}
+          </ReportSection>
         </>
       )}
+
+      <ReportDetailsDrawer
+        open={drawer !== null}
+        onClose={() => setDrawer(null)}
+        title={
+          drawer?.kind === "task"
+            ? (taskById.get(drawer.taskId)?.title ?? "Task")
+            : drawer?.kind === "fs"
+              ? (standardById.get(drawer.standardId)?.title ?? "Standard")
+              : ""
+        }
+      >
+        {drawer?.kind === "task" && (
+          <div className="flex flex-col gap-2">
+            <p className="text-xs text-ink/50">Recent history, this period</p>
+            {drawerTaskRows.length === 0 && <p className="text-sm text-ink/50">No submissions in this period.</p>}
+            {drawerTaskRows.map((r) => (
+              <div key={r.id} className="rounded border p-2 text-sm">
+                <div className="flex items-center justify-between">
+                  <span>{r.due_date}</span>
+                  <span
+                    className={`rounded-pill px-2 py-0.5 font-mono text-[10px] font-bold uppercase ${
+                      r.status === "completed" ? "bg-success/16 text-success-ink" : r.status === "missed" ? "bg-red/16 text-red-ink" : "bg-ink/10"
+                    }`}
+                  >
+                    {r.status}
+                  </span>
+                </div>
+                {r.submitted_by && (
+                  <p className="mt-0.5 text-xs text-ink/60">{managerNameById.get(r.submitted_by) ?? "Unknown"}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {drawer?.kind === "fs" && (
+          <div className="flex flex-col gap-2">
+            <p className="text-xs text-ink/50">Recent history, this period</p>
+            {drawerFsRows.length === 0 && <p className="text-sm text-ink/50">No submissions in this period.</p>}
+            {drawerFsRows.map((r) => (
+              <div key={r.id} className="rounded border p-2 text-sm">
+                <div className="flex items-center justify-between">
+                  <span>{r.due_date}</span>
+                  <span
+                    className={`rounded-pill px-2 py-0.5 font-mono text-[10px] font-bold uppercase ${
+                      r.result === "pass" ? "bg-success/16 text-success-ink" : r.result === "fail" ? "bg-red/16 text-red-ink" : "bg-ink/10"
+                    }`}
+                  >
+                    {r.result}
+                  </span>
+                </div>
+                {r.submitted_by && <p className="mt-0.5 text-xs text-ink/60">{managerNameById.get(r.submitted_by) ?? "Unknown"}</p>}
+                {r.corrective_note && <p className="mt-0.5 text-xs text-ink/60">Note: {r.corrective_note}</p>}
+                {r.photo_url && (
+                  <button
+                    type="button"
+                    onClick={() => setLightboxUrl(r.photo_url)}
+                    className="mt-0.5 text-xs underline"
+                  >
+                    View photo
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </ReportDetailsDrawer>
+
+      {lightboxUrl && <PhotoLightbox photoUrl={lightboxUrl} onClose={() => setLightboxUrl(null)} />}
     </main>
   );
 }

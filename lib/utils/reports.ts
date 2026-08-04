@@ -1,56 +1,67 @@
-// comanager-context Reporting Rules: the Day/Week/Month/3-Months toggle
-// changes how data is grouped, not just the date range — Month/3-Months
-// must aggregate (weekly/monthly buckets), never plot raw daily points.
-//
-// The spec doesn't give exact window lengths, so these are a deliberate,
-// documented choice rather than an invented business rule: Day/Week stay
-// at daily granularity (short enough to read one point per day), Month
-// aggregates into weekly buckets, 3-Months into monthly buckets.
-export type ReportRange = "day" | "week" | "month" | "3months";
+// Reports page range/bucketing utilities (rebuilt 2026-08-05 — see
+// comanager-design-match for the full spec). comanager-context Reporting
+// Rules: the time-range toggle changes how data is *grouped*, not just the
+// date span — 3 Months must aggregate into weekly buckets, never raw daily
+// points.
+export type ReportRange = "7days" | "30days" | "3months";
 
 export const RANGE_WINDOW_DAYS: Record<ReportRange, number> = {
-  day: 7,
-  week: 28,
-  month: 180, // ~6 months, shown as weekly buckets
-  "3months": 365, // ~12 months, shown as monthly buckets
+  "7days": 7,
+  "30days": 30,
+  "3months": 90,
 };
 
-export const RANGE_BUCKET: Record<ReportRange, "day" | "week" | "month"> = {
-  day: "day",
-  week: "day",
-  month: "week",
-  "3months": "month",
+export const RANGE_BUCKET: Record<ReportRange, "day" | "week"> = {
+  "7days": "day",
+  "30days": "day",
+  "3months": "week",
 };
 
-import { parseDueDate, riyadhDaysAgoString } from "./riyadh-date";
+import { parseDueDate, riyadhDateString, riyadhDaysAgoString } from "./riyadh-date";
 
-// due_date is a Riyadh-calendar-day string (comanager-logic §4) — the
-// range's start boundary must be computed with the same Riyadh-offset
-// math the values themselves use, not raw local-browser-clock arithmetic
-// (audit finding, 2026-07-30; see riyadh-date.ts).
-export function rangeStartDate(range: ReportRange): string {
-  return riyadhDaysAgoString(RANGE_WINDOW_DAYS[range]);
+// Inclusive of today: a 7-day window is [today-6, today].
+export function rangeStartDate(range: ReportRange, from: Date = new Date()): string {
+  return riyadhDaysAgoString(RANGE_WINDOW_DAYS[range] - 1, from);
 }
 
-// ISO week key (Sunday-start) for weekly bucketing. Takes a due_date
-// string directly and parses/reads it entirely in UTC (parseDueDate) —
-// never construct `new Date(dueDateString)` and call a *local* getter on
-// it, since that silently depends on the viewer's own browser timezone
-// (audit finding, 2026-07-30; see riyadh-date.ts).
+export interface RangeBounds {
+  start: string;
+  end: string;
+}
+
+export function currentRangeBounds(range: ReportRange, from: Date = new Date()): RangeBounds {
+  return { start: rangeStartDate(range, from), end: riyadhDateString(from) };
+}
+
+// The N days immediately preceding the current window, same length, no
+// overlap — used for every KPI/insight's "vs previous equivalent period"
+// comparison.
+export function previousRangeBounds(range: ReportRange, from: Date = new Date()): RangeBounds {
+  const windowDays = RANGE_WINDOW_DAYS[range];
+  return {
+    start: riyadhDaysAgoString(windowDays * 2 - 1, from),
+    end: riyadhDaysAgoString(windowDays, from),
+  };
+}
+
+// ISO week key (Sunday-start) for weekly bucketing. Takes a due_date string
+// directly and parses/reads it entirely in UTC (parseDueDate) — never
+// construct `new Date(dueDateString)` and call a *local* getter on it,
+// since that silently depends on the viewer's own browser timezone (audit
+// finding, 2026-07-30; see riyadh-date.ts).
 export function weekKey(dueDate: string): string {
   const d = parseDueDate(dueDate);
   d.setUTCDate(d.getUTCDate() - d.getUTCDay());
   return d.toISOString().slice(0, 10);
 }
 
-export function monthKey(dueDate: string): string {
-  return dueDate.slice(0, 7); // YYYY-MM
+export function bucketKey(dueDate: string, bucket: "day" | "week"): string {
+  return bucket === "day" ? dueDate : weekKey(dueDate);
 }
 
-export function bucketKey(dueDate: string, bucket: "day" | "week" | "month"): string {
-  if (bucket === "day") return dueDate;
-  if (bucket === "week") return weekKey(dueDate);
-  return monthKey(dueDate);
+// Whether `dueDate` falls within [start, end] (both inclusive, plain
+// string comparison — due_date is always YYYY-MM-DD, so lexical and
+// chronological ordering agree).
+export function inRange(dueDate: string, bounds: RangeBounds): boolean {
+  return dueDate >= bounds.start && dueDate <= bounds.end;
 }
-
-export const DAY_OF_WEEK_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
