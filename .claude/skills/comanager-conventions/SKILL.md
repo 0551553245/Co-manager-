@@ -97,6 +97,27 @@ rediscover them.
   (breaks with mixed Arabic/English strings) — wrap in try/catch, and
   invalidate any cached list after a successful delete.
 
+## Dependency Decisions
+
+- **No charting/animation library — hand-built SVG + CSS/Tailwind
+  transitions only (locked 2026-08-05, during the Reports page rebuild).**
+  A founder brief explicitly named `recharts` and a `Motion`/`framer-motion`
+  library for that rebuild. Considered it directly — asked the founder
+  rather than guessing — and the founder chose to keep extending this
+  app's existing hand-rolled SVG chart pattern (used everywhere else
+  already) instead: zero new dependencies, and no reason to put an
+  already-verified-working build at risk for a swap with no clear benefit
+  at this app's scale (comanager-logic: ~100 owners). **This was a
+  considered decision, not an oversight or something nobody thought
+  of — do not silently revisit it.**
+  **Rule:** if a future brief names a specific charting or animation
+  library again, that's a conflict with this locked decision, not a green
+  light — flag it and ask the founder before proceeding, same as any other
+  locked-decision conflict in this project (comanager-context's own "THIS
+  FILE WINS" framing: surface the conflict, never silently pick a side).
+  Do not add the library just because a brief named it, and do not ignore
+  a direct founder instruction to add it either — ask.
+
 ## Adding a new rule
 When a new bug is found and fixed, add it here immediately in this format,
 and never delete an existing entry:
