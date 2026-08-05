@@ -6,6 +6,7 @@ import { usePanelAuthContext } from "@/lib/auth/panel-auth-context";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { uploadPhoto } from "@/lib/cloudinary/upload-photo";
 import { riyadhDateString } from "@/lib/utils/riyadh-date";
+import { useManagerShift } from "@/lib/hooks/useManagerShift";
 import { PhotoLightbox } from "@/components/PhotoLightbox";
 
 interface TaskDef {
@@ -28,6 +29,7 @@ interface TaskItem {
 interface TaskSub {
   id: string;
   task_id: string;
+  shift_id: string | null;
   status: "completed" | "pending" | "missed";
 }
 interface TaskItemSub {
@@ -45,6 +47,7 @@ interface TaskItemSub {
 // task_items, each with its own task_item_submissions row for this cycle.
 export default function BranchManagerTasksPage() {
   const { loading, profile, client } = usePanelAuthContext();
+  const { shiftUIVisible, currentShiftId } = useManagerShift(client, profile, !loading && !!profile);
 
   const [tasks, setTasks] = useState<TaskDef[]>([]);
   const [items, setItems] = useState<TaskItem[]>([]);
@@ -75,7 +78,7 @@ export default function BranchManagerTasksPage() {
         .order("sort_order"),
       client
         .from("task_submissions")
-        .select("id, task_id, status")
+        .select("id, task_id, shift_id, status")
         .eq("branch_id", profile.branch_id)
         .eq("due_date", today),
     ]);
@@ -109,6 +112,13 @@ export default function BranchManagerTasksPage() {
     return <main className="p-8 text-sm text-ink/60">Loading...</main>;
   }
 
+  // comanager-logic §9: filtered only once the branch has 2+ active
+  // shifts — below that, this page behaves exactly as before the
+  // feature existed. Shift-agnostic rows (shift_id: null) always show.
+  const relevantSubmissions = shiftUIVisible
+    ? submissions.filter((s) => s.shift_id === currentShiftId || s.shift_id === null)
+    : submissions;
+
   // Once every item under a task_submissions row is completed, roll that
   // parent row up to 'completed' too (comanager-logic §4). Client-side is
   // safe here: at most 2 managers per branch, and setting status to the
@@ -141,11 +151,11 @@ export default function BranchManagerTasksPage() {
 
       {dataLoading ? (
         <p className="mt-6 text-sm text-ink/60">Loading...</p>
-      ) : submissions.length === 0 ? (
+      ) : relevantSubmissions.length === 0 ? (
         <p className="mt-6 text-sm text-ink/60">Nothing due today.</p>
       ) : (
         <div className="mt-6 flex flex-col gap-3">
-          {submissions.map((sub) => {
+          {relevantSubmissions.map((sub) => {
             const task = tasks.find((t) => t.id === sub.task_id);
             if (!task) return null;
             const taskItems = items.filter((i) => i.task_id === task.id);

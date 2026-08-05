@@ -6,6 +6,7 @@ import { usePanelAuthContext } from "@/lib/auth/panel-auth-context";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { uploadPhoto } from "@/lib/cloudinary/upload-photo";
 import { riyadhDateString } from "@/lib/utils/riyadh-date";
+import { useManagerShift } from "@/lib/hooks/useManagerShift";
 import { PhotoLightbox } from "@/components/PhotoLightbox";
 
 interface Standard {
@@ -19,6 +20,7 @@ interface Standard {
 interface Submission {
   id: string;
   standard_id: string;
+  shift_id: string | null;
   result: "pending" | "pass" | "fail";
   actual_value: number | null;
   corrective_note: string | null;
@@ -33,6 +35,7 @@ const RESULT_STYLE: Record<Submission["result"], string> = {
 
 export default function BranchManagerFoodSafetyPage() {
   const { loading, profile, client } = usePanelAuthContext();
+  const { shiftUIVisible, currentShiftId } = useManagerShift(client, profile, !loading && !!profile);
 
   const [standards, setStandards] = useState<Standard[]>([]);
   const [submissions, setSubmissions] = useState<Submission[]>([]);
@@ -57,7 +60,7 @@ export default function BranchManagerFoodSafetyPage() {
         .eq("is_active", true),
       client
         .from("food_safety_submissions")
-        .select("id, standard_id, result, actual_value, corrective_note, photo_url")
+        .select("id, standard_id, shift_id, result, actual_value, corrective_note, photo_url")
         .eq("branch_id", profile.branch_id)
         .eq("due_date", today),
     ]);
@@ -88,6 +91,13 @@ export default function BranchManagerFoodSafetyPage() {
     return <main className="p-8 text-sm text-ink/60">Loading...</main>;
   }
 
+  // comanager-logic §9: filtered only once the branch has 2+ active
+  // shifts — below that, this page behaves exactly as before the
+  // feature existed. Shift-agnostic rows (shift_id: null) always show.
+  const relevantSubmissions = shiftUIVisible
+    ? submissions.filter((s) => s.shift_id === currentShiftId || s.shift_id === null)
+    : submissions;
+
   return (
     <main className="p-8">
       <h1 className="font-display text-2xl">Food Safety</h1>
@@ -101,11 +111,11 @@ export default function BranchManagerFoodSafetyPage() {
 
       {dataLoading ? (
         <p className="mt-6 text-sm text-ink/60">Loading...</p>
-      ) : submissions.length === 0 ? (
+      ) : relevantSubmissions.length === 0 ? (
         <p className="mt-6 text-sm text-ink/60">Nothing due today.</p>
       ) : (
         <div className="mt-6 flex flex-col gap-3">
-          {submissions.map((sub) => {
+          {relevantSubmissions.map((sub) => {
             const standard = standards.find((s) => s.id === sub.standard_id);
             if (!standard) return null;
             return (
