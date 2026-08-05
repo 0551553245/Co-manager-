@@ -5,6 +5,7 @@ import { usePanelAuthContext } from "@/lib/auth/panel-auth-context";
 import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { calcRate, completionColor } from "@/lib/utils/completion";
 import { parseDueDate, riyadhDateString, riyadhDaysAgoString } from "@/lib/utils/riyadh-date";
+import { useOwnerBranchFilter } from "@/lib/hooks/useOwnerBranchFilter";
 
 interface Branch {
   id: string;
@@ -70,12 +71,13 @@ export default function OwnerDashboardPage() {
   const [events, setEvents] = useState<EventRow[]>([]);
   const [todaySchedule, setTodaySchedule] = useState<TodayEventRow[]>([]);
   const [managerNames, setManagerNames] = useState<Record<string, string>>({});
-  // "" = All Branches. Client-side only, same pattern as the Reports page's
-  // own branchFilter — loadData always fetches every branch's data
-  // (RLS already scopes it to this owner), so switching branches is
-  // instant with no refetch, and the realtime subscriptions below never
-  // need to know about this filter at all.
-  const [branchFilter, setBranchFilter] = useState<string>("");
+  // "" = All Branches. Persisted across every owner page that has this
+  // filter (comanager-conventions' shared-branch-filter pattern) via
+  // sessionStorage, one key for both Dashboard and Reports — loadData
+  // always fetches every branch's data regardless (RLS already scopes it
+  // to this owner), so switching branches is instant with no refetch, and
+  // the realtime subscriptions below never need to know this filter exists.
+  const [branchFilter, setBranchFilter] = useOwnerBranchFilter();
   const [dataLoading, setDataLoading] = useState(true);
 
   const loadData = useCallback(async () => {

@@ -15,6 +15,7 @@ import {
   type ReportRange,
 } from "@/lib/utils/reports";
 import { parseDueDate, riyadhDateString, riyadhDaysAgoString } from "@/lib/utils/riyadh-date";
+import { useOwnerBranchFilter } from "@/lib/hooks/useOwnerBranchFilter";
 import { PhotoLightbox } from "@/components/PhotoLightbox";
 import { ReportsHeader } from "./components/ReportsHeader";
 import { GlobalReportFilters } from "./components/GlobalReportFilters";
@@ -116,7 +117,10 @@ export default function ReportsPage() {
   const [dataLoading, setDataLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [range, setRange] = useState<ReportRange>("30days");
-  const [branchFilter, setBranchFilter] = useState<string>("");
+  // Shared with the Dashboard page's identical filter via sessionStorage
+  // (comanager-conventions' shared-branch-filter pattern) — selecting a
+  // branch here carries over there and back, one storage key for both.
+  const [branchFilter, setBranchFilter] = useOwnerBranchFilter();
   const [highlightedTaskId, setHighlightedTaskId] = useState<string | null>(null);
   const [highlightedFsId, setHighlightedFsId] = useState<string | null>(null);
   const [drawer, setDrawer] = useState<DrawerState>(null);

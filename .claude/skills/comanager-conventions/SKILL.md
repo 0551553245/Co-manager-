@@ -90,6 +90,42 @@ rediscover them.
 - Double-check Arabic/English string order in every ternary —
   `isArabic ? arabicText : englishText`, verified both ways, not assumed.
 
+## Shared Filter State (Persisted Across Pages)
+
+- **A filter that appears on more than one owner page (branch filter,
+  etc.) must share ONE persistence key, not a separate one per page.**
+  comanager-design-match documents the branch filter as living on "most
+  owner pages," and Dashboard's copy of it was originally built with its
+  own local `useState` — the moment a second page (Reports) needed the
+  same filter, that would have meant two independent, driftable copies of
+  "which branch is selected" with no way to keep them in sync as the
+  founder navigates between pages.
+- **Fix/pattern (added 2026-08-05):** `lib/hooks/useOwnerBranchFilter.ts`
+  — a single hook, backed by one `sessionStorage` key
+  (`comanager-owner-branch-filter`), used by both Dashboard and Reports.
+  Selecting a branch on either page persists it for both; it survives
+  in-app navigation and a full page refresh, and clears when the
+  browser tab/session closes (deliberately `sessionStorage`, not
+  `localStorage` — no stale branch selection resurfacing days later in a
+  brand new session).
+  ```ts
+  // Any new page that adds a branch filter reuses this, never a fresh
+  // local useState:
+  const [branchFilter, setBranchFilter] = useOwnerBranchFilter();
+  ```
+- The hook starts at `""` (All Branches) on every render — including the
+  initial one — then syncs from `sessionStorage` inside a `useEffect`,
+  never by reading `sessionStorage` in the `useState` initializer.
+  `sessionStorage` doesn't exist during SSR/the initial render pass, and
+  reading it there risks a hydration mismatch. Every page that uses this
+  hook already gates its real content behind an auth/data-loading state,
+  so the brief `""` window before the effect runs is never visible.
+- **Rule:** before adding a `useState` for any filter/preference that
+  already exists on another owner page (or plausibly will soon), check
+  whether a shared hook like this one should own it instead — a
+  page-local `useState` for something conceptually page-independent is
+  exactly how two silently-diverging copies of "the same" state happen.
+
 ## Dev Environment
 - Only one dev server running at a time.
 - Remove all `console.log`; only `console.error` inside catch blocks is allowed in shipped code.
