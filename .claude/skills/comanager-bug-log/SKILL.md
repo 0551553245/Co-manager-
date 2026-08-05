@@ -2129,6 +2129,81 @@ correct percentages matching the actual submission/event data.
 
 ---
 
+### BUG #040 — PostgREST Upsert onConflict Can't Target an Expression Index — Caught Before Deploy, Not Live
+**Severity:** MEDIUM (would have broken slot-generation idempotency the
+moment it ran against a branch with any active shift, but never actually
+shipped in the broken form — caught by reasoning through the actual
+request PostgREST builds, before writing any app code against it)
+**Area/File:** `supabase/migrations/*_work_shifts*.sql`,
+`supabase/functions/generate-daily-slots/index.ts` (Work Shifts,
+comanager-logic §9)
+
+**Found during:** planning the Work Shifts schema migration — extending
+`task_submissions`'/`food_safety_submissions`' uniqueness to include a
+new nullable `shift_id` column. Postgres unique constraints never treat
+two NULLs as equal, so a plain `unique(..., shift_id)` would stop
+deduplicating every row where `shift_id` is NULL (i.e. every branch with
+zero shifts — most branches). The fix for *that* problem is
+well-known — a `COALESCE(shift_id, sentinel)` unique expression index —
+and was applied first, live, before this second issue was caught.
+
+**The problem:** this codebase's slot generation never runs raw SQL
+against Postgres — `generate-daily-slots/index.ts` upserts through
+`@supabase/supabase-js`, which compiles `.upsert(rows, { onConflict:
+"task_id,branch_id,due_date" })` into a PostgREST request, and
+PostgREST's `on_conflict` query parameter only accepts a **plain
+column-name list** matching a real, named unique constraint — it has no
+mechanism to target an arbitrary expression (like
+`COALESCE(shift_id, sentinel)`) the way a hand-written
+`INSERT ... ON CONFLICT (col1, col2, COALESCE(...))` could in raw SQL.
+An expression-index-based fix that is perfectly valid Postgres is
+silently unusable from this app's only actual write path.
+
+**WRONG:**
+```sql
+create unique index task_submissions_unique_slot on public.task_submissions (
+  task_id, branch_id, due_date, coalesce(shift_id, '00000000-0000-0000-0000-000000000000'::uuid)
+);
+```
+```ts
+// PostgREST's on_conflict can't reference the coalesce(...) expression —
+// there is no column list that matches this index.
+.upsert(taskRows, { onConflict: "task_id,branch_id,due_date,shift_id" })
+```
+
+**CORRECT:**
+```sql
+-- A real GENERATED ALWAYS column materializes the same NULL-safe value
+-- as an ordinary, plain column — indexable and constraint-able the
+-- normal way, and Postgres computes it automatically on every
+-- insert/update, so the app never sends a value for it.
+alter table public.task_submissions
+  add column shift_key uuid generated always as (
+    coalesce(shift_id, '00000000-0000-0000-0000-000000000000'::uuid)
+  ) stored;
+alter table public.task_submissions
+  add constraint task_submissions_unique_slot unique (task_id, branch_id, due_date, shift_key);
+```
+```ts
+.upsert(taskRows, { onConflict: "task_id,branch_id,due_date,shift_key" })
+```
+
+**Rule:** Any NULL-safe uniqueness fix (the `COALESCE(col, sentinel)`
+expression-index pattern) that needs to be reachable through
+`@supabase/supabase-js`'s `.upsert({ onConflict })` — as opposed to raw
+SQL — must be materialized as a real `GENERATED ALWAYS ... STORED`
+column with a plain named unique constraint on it, never a bare
+expression index. PostgREST's `on_conflict` parameter is a column-name
+list, not a SQL expression parser; confirm the actual write path (ORM/
+REST helper vs. raw SQL) before assuming a Postgres-valid constraint
+shape is reachable from it. Caught here by tracing through exactly what
+`.upsert()` compiles to before deploying, not by a live failure — the
+same rigor is worth applying any time a "correct in Postgres" fix is
+about to be driven through a REST/ORM layer with its own narrower
+surface.
+
+---
+
 ## ➕ HOW TO ADD A NEW BUG
 
 When you fix a new bug, add it at the bottom of the relevant severity

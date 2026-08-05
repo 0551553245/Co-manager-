@@ -270,6 +270,62 @@ touches as possible.**
 
 ---
 
+## 9. Work Shifts (NEW — decided 2026-08-05, not yet built)
+
+This REVERSES the earlier "don't build a shift system" call documented
+in comanager-design-match's Resolved Conflicts table (the mockup-filler
+"Shift ends: 22:00" ring was correctly ignored THEN, but shifts are now
+a real, deliberately-scoped feature being added now, as of this
+decision). Update that Resolved Conflicts entry to reflect this reversal
+rather than leaving it looking contradictory.
+
+Optional, per-branch feature. A branch with zero shifts defined behaves
+exactly as before this feature existed — no filtering, no switcher UI,
+full backward compatibility required.
+
+- Shifts are owner-defined, per branch — custom name + start/end time
+  (e.g. "Morning" 6am-3pm, "Evening" 3pm-11pm). Not a fixed global enum.
+- Tasks/standards get an optional shift tag: unscoped (applies to every
+  shift the branch has, if any) or scoped to one specific shift - same
+  pattern as the existing branch_id null="all branches" scoping, one
+  more layer.
+- A task scoped to "both/all shifts" needs a SEPARATE submission slot
+  per shift, not one shared slot - e.g. a twice-daily temperature check
+  generates two rows for that day, one per shift. This changes slot
+  generation (§4): for each active task/standard, expand across every
+  shift it applies to (all of the branch's shifts if unscoped, else just
+  the one), not just across branches.
+- Managers are NOT permanently assigned to a shift. A manager can work
+  either shift on different days. They declare which shift they're on
+  via a simple manual switcher (e.g. tap "Morning" or "Evening" on their
+  dashboard) - this is mutable state on their own profile, not a real
+  scheduling system. Their "today's tasks" list filters to submissions
+  matching their currently-selected shift (plus any shift-agnostic ones,
+  for branches with no shifts configured).
+- Shift handover: a simple text note (no photo) the outgoing shift's
+  manager can leave, surfaced prominently to the next shift's manager -
+  e.g. shown when they select/switch into a shift. One handover note per
+  branch per shift per day is the simplest model - don't over-engineer
+  into a full messaging thread.
+- Reporting implication to consider when building: Reports/Dashboard
+  numbers should still make sense whether or not shifts are in use -
+  don't force shift-breakdown UI onto branches that don't use shifts.
+- Single-shift edge case: if a branch has exactly ONE shift configured,
+  treat it the same as zero shifts for UI purposes - hide the shift
+  switcher and handover-note UI entirely (a single-option switcher is
+  pointless friction). Only show shift UI when a branch has 2+ active
+  shifts. The task/standard "which shift" tag can still exist in the
+  data model for a 1-shift branch (auto-assigned to that one shift),
+  it's just invisible in the manager's UI.
+- Where shifts get configured: inside the owner's Branches page, when
+  editing a specific branch - a new "Shifts" section within that
+  branch's edit view, not a separate top-level sidebar page. Shifts are
+  branch-specific config, same category as the branch's name/address/
+  manager-cap already shown there. Deliberately not adding a 9th sidebar
+  item for a feature some restaurants won't use at all.
+
+---
+
 ## Summary Checklist (use this before building any related feature)
 
 - [ ] Does this touch manager creation/removal? → cap enforced in UI, app, AND database

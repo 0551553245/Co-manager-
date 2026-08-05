@@ -10,17 +10,28 @@
 //   1. Pre-create today's pending task_submissions / food_safety_submissions
 //      rows for every active daily task/standard (plus weekly on Monday,
 //      monthly on the 1st) — expanding branch_id: null into one row per
-//      owner's own active branches. Tasks are checklists now (2026-07-29):
-//      each task_submissions row also gets one task_item_submissions row
-//      per active task_item under that task, seeded at the same time.
+//      owner's own active branches, and (comanager-logic §9, added
+//      2026-08-05) each branch expansion into one row PER SHIFT the task/
+//      standard applies to: zero shifts on that branch → one shift-agnostic
+//      row exactly as before this feature existed; task/standard scoped to
+//      one specific shift → one row for that shift; unscoped on a branch
+//      that has shifts → one row per active shift on that branch. Tasks
+//      are checklists now (2026-07-29): each task_submissions row also
+//      gets one task_item_submissions row per active task_item under that
+//      task, seeded at the same time.
 //   2. Flip any still-pending row whose due_date is now in the past to
 //      'missed' — this is what makes a slot "automatically missed" without
 //      anyone manually marking it. Cascades down to item-level rows too.
 //
 // Idempotent: upserts with onConflict + ignoreDuplicates so re-running this
-// for the same day never resets or duplicates an already-generated slot
-// (relies on the unique(task_id, branch_id, due_date) / unique(standard_id,
-// branch_id, due_date) constraints added to comanager-schema.sql for this).
+// for the same day never resets or duplicates an already-generated slot.
+// Relies on task_submissions_unique_slot / fs_submissions_unique_slot —
+// unique(..., shift_key), where shift_key is a GENERATED ALWAYS column
+// materializing coalesce(shift_id, <sentinel>) (added 2026-08-05 for
+// shifts — see that migration's own comment for why a real generated
+// column was needed instead of a plain expression index: PostgREST's
+// upsert onConflict parameter only accepts a plain column list matching a
+// real named unique constraint, not an arbitrary expression).
 //
 // Scoped/immediate mode (added 2026-08-01): a request body of
 // `{ "taskId": "..." }` or `{ "standardId": "..." }` generates *today's*
@@ -75,8 +86,8 @@ Deno.serve(async (req: Request) => {
   if (isMonday) frequencies.push("weekly");
   if (isFirstOfMonth) frequencies.push("monthly");
 
-  let tasks: { id: string; owner_id: string; branch_id: string | null }[] = [];
-  let standards: { id: string; owner_id: string; branch_id: string | null }[] = [];
+  let tasks: { id: string; owner_id: string; branch_id: string | null; shift_id: string | null }[] = [];
+  let standards: { id: string; owner_id: string; branch_id: string | null; shift_id: string | null }[] = [];
 
   if (scopedTaskId) {
     // Immediate mode always generates today's slot regardless of the
@@ -85,7 +96,7 @@ Deno.serve(async (req: Request) => {
     // not whether a brand-new (or just-reactivated) task gets its first one.
     const { data, error } = await supabase
       .from("tasks")
-      .select("id, owner_id, branch_id")
+      .select("id, owner_id, branch_id, shift_id")
       .eq("id", scopedTaskId)
       .eq("is_active", true);
     if (error) {
@@ -95,7 +106,7 @@ Deno.serve(async (req: Request) => {
   } else if (!isScoped) {
     const { data, error } = await supabase
       .from("tasks")
-      .select("id, owner_id, branch_id")
+      .select("id, owner_id, branch_id, shift_id")
       .eq("is_active", true)
       .in("frequency", frequencies);
     if (error) {
@@ -107,7 +118,7 @@ Deno.serve(async (req: Request) => {
   if (scopedStandardId) {
     const { data, error } = await supabase
       .from("food_safety_standards")
-      .select("id, owner_id, branch_id")
+      .select("id, owner_id, branch_id, shift_id")
       .eq("id", scopedStandardId)
       .eq("is_active", true);
     if (error) {
@@ -117,7 +128,7 @@ Deno.serve(async (req: Request) => {
   } else if (!isScoped) {
     const { data, error } = await supabase
       .from("food_safety_standards")
-      .select("id, owner_id, branch_id")
+      .select("id, owner_id, branch_id, shift_id")
       .eq("is_active", true)
       .in("check_frequency", frequencies);
     if (error) {
@@ -158,36 +169,81 @@ Deno.serve(async (req: Request) => {
   }
 
   const branchesByOwner = new Map<string, string[]>();
+  const allBranchIds: string[] = [];
   (branches ?? []).forEach((b) => {
     const list = branchesByOwner.get(b.owner_id) ?? [];
     list.push(b.id);
     branchesByOwner.set(b.owner_id, list);
+    allBranchIds.push(b.id);
   });
+
+  // comanager-logic §9: each branch may have its own set of active
+  // shifts. Ordering by start_time isn't load-bearing for correctness
+  // here (every applicable shift gets its own row regardless of order),
+  // it's just a stable, human-sensible order for the rows this produces.
+  const { data: branchShifts, error: branchShiftsError } = await supabase
+    .from("branch_shifts")
+    .select("id, branch_id")
+    .eq("is_active", true)
+    .in("branch_id", allBranchIds.length ? allBranchIds : ["00000000-0000-0000-0000-000000000000"])
+    .order("start_time");
+  if (branchShiftsError) {
+    return new Response(
+      JSON.stringify({ step: "fetch branch_shifts", error: branchShiftsError.message }),
+      { status: 500 },
+    );
+  }
+  const shiftsByBranch = new Map<string, string[]>();
+  (branchShifts ?? []).forEach((s) => {
+    const list = shiftsByBranch.get(s.branch_id) ?? [];
+    list.push(s.id);
+    shiftsByBranch.set(s.branch_id, list);
+  });
+
+  // comanager-logic §9's expansion rule, applied identically to tasks and
+  // food-safety standards: a branch with zero active shifts produces
+  // exactly one shift-agnostic row (shift_id: null) — the same row shape
+  // as before this feature existed, so a branch that's never touched
+  // shifts is completely unaffected. A branch with shifts produces one
+  // row per applicable shift: just the one the definition is scoped to,
+  // or every active shift on that branch if the definition is unscoped.
+  function expandShiftIds(defShiftId: string | null, branchId: string): (string | null)[] {
+    const shifts = shiftsByBranch.get(branchId) ?? [];
+    if (shifts.length === 0) return [null];
+    if (defShiftId !== null) return [defShiftId];
+    return shifts;
+  }
 
   const taskRows = tasks.flatMap((t) => {
     const branchIds = t.branch_id ? [t.branch_id] : (branchesByOwner.get(t.owner_id) ?? []);
-    return branchIds.map((branchId) => ({
-      task_id: t.id,
-      branch_id: branchId,
-      status: "pending",
-      due_date: riyadhToday,
-    }));
+    return branchIds.flatMap((branchId) =>
+      expandShiftIds(t.shift_id, branchId).map((shiftId) => ({
+        task_id: t.id,
+        branch_id: branchId,
+        shift_id: shiftId,
+        status: "pending",
+        due_date: riyadhToday,
+      })),
+    );
   });
 
   const fsRows = standards.flatMap((s) => {
     const branchIds = s.branch_id ? [s.branch_id] : (branchesByOwner.get(s.owner_id) ?? []);
-    return branchIds.map((branchId) => ({
-      standard_id: s.id,
-      branch_id: branchId,
-      result: "pending",
-      due_date: riyadhToday,
-    }));
+    return branchIds.flatMap((branchId) =>
+      expandShiftIds(s.shift_id, branchId).map((shiftId) => ({
+        standard_id: s.id,
+        branch_id: branchId,
+        shift_id: shiftId,
+        result: "pending",
+        due_date: riyadhToday,
+      })),
+    );
   });
 
   if (taskRows.length > 0) {
     const { error } = await supabase
       .from("task_submissions")
-      .upsert(taskRows, { onConflict: "task_id,branch_id,due_date", ignoreDuplicates: true });
+      .upsert(taskRows, { onConflict: "task_id,branch_id,due_date,shift_key", ignoreDuplicates: true });
     if (error) {
       return new Response(JSON.stringify({ step: "upsert task_submissions", error: error.message }), {
         status: 500,
@@ -233,7 +289,7 @@ Deno.serve(async (req: Request) => {
   if (fsRows.length > 0) {
     const { error } = await supabase
       .from("food_safety_submissions")
-      .upsert(fsRows, { onConflict: "standard_id,branch_id,due_date", ignoreDuplicates: true });
+      .upsert(fsRows, { onConflict: "standard_id,branch_id,due_date,shift_key", ignoreDuplicates: true });
     if (error) {
       return new Response(
         JSON.stringify({ step: "upsert food_safety_submissions", error: error.message }),
