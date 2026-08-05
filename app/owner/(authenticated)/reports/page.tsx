@@ -219,6 +219,16 @@ export default function ReportsPage() {
 
   useRealtimeTable(client, `owner-reports-${profile?.id ?? "anon"}`, "task_submissions", scheduleBackgroundReload);
   useRealtimeTable(client, `owner-reports-fs-${profile?.id ?? "anon"}`, "food_safety_submissions", scheduleBackgroundReload);
+  // Individual checklist items completing only touch task_item_submissions,
+  // not the parent task_submissions row (comanager-logic §4's rollup rule) —
+  // without this, this page stays stale until a whole multi-item task
+  // finishes. Same gap already fixed on the Tasks page's item channel.
+  useRealtimeTable(
+    client,
+    `owner-reports-items-${profile?.id ?? "anon"}`,
+    "task_item_submissions",
+    scheduleBackgroundReload,
+  );
 
   if (loading || !profile) {
     return <main className="p-8 text-sm text-ink/60">Loading...</main>;

@@ -122,8 +122,11 @@ export default function SchedulePage() {
   }
 
   function eventsOnDay(day: Date) {
-    const dayStr = day.toISOString().slice(0, 10);
-    return events.filter((e) => e.start_time.slice(0, 10) === dayStr);
+    // Compare local calendar days on both sides (never .toISOString().slice(0,10)
+    // on a locally-built Date — that rolls the date back a day for any positive
+    // UTC offset, e.g. Asia/Riyadh, before comparing against the UTC-stored
+    // start_time). Same local-day comparison the Day/Week views already use below.
+    return events.filter((e) => new Date(e.start_time).toDateString() === day.toDateString());
   }
 
   const weekStart = new Date(anchor);

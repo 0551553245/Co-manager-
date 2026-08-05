@@ -1928,6 +1928,207 @@ whole rather than a single task's own checklist.
 
 ---
 
+### BUG #037 — Schedule Month View Showed Every Event One Day Later Than Its Actual Date
+**Severity:** MEDIUM (display-only, no data corruption)
+**Area/File:** `app/owner/(authenticated)/schedule/page.tsx` — `eventsOnDay()`
+
+**Found during:** a full end-to-end QA pass on the live site (2026-08-05),
+creating real schedule events across all 4 branches and checking every
+screen against the actual data. Verified with a clean reproduction: 4
+events all actually stored for the same date (confirmed via the page's own
+Day view, which lists `8/5/2026` for all 4) rendered in the **Aug 6** cell
+in Month view — one day forward, every time, for every event.
+
+**The problem:** `eventsOnDay(day)` bucketed the locally-built grid `day`
+via `day.toISOString().slice(0, 10)` before comparing against the
+UTC-stored `start_time`. `.toISOString()` on a `Date` built from local
+year/month/day components (`new Date(year, month, date)`, the exact
+pattern the month-grid loop uses) converts through UTC — for
+`Asia/Riyadh` (UTC+3), the timezone every real Co Manager owner is in,
+local midnight is UTC 21:00 the *previous* day, so the bucket key rolls
+back a full calendar day before the comparison ever runs. Net effect:
+every event compares as belonging to the day *after* the grid cell it's
+actually being tested against, so it renders one cell later than reality.
+Day/Week views were unaffected — they already compared via
+`new Date(e.start_time).toDateString() === anchor.toDateString()`, a
+local-to-local comparison with no UTC round-trip in the middle.
+
+**WRONG:**
+```ts
+function eventsOnDay(day: Date) {
+  const dayStr = day.toISOString().slice(0, 10); // rolls back a day for
+                                                   // any positive UTC offset
+  return events.filter((e) => e.start_time.slice(0, 10) === dayStr);
+}
+```
+
+**CORRECT:**
+```ts
+function eventsOnDay(day: Date) {
+  // Compare local calendar days on both sides — never .toISOString().slice(0,10)
+  // on a locally-built Date. Same local-day comparison the Day/Week views
+  // already used correctly.
+  return events.filter((e) => new Date(e.start_time).toDateString() === day.toDateString());
+}
+```
+
+**Rule:** Never call `.toISOString().slice(0, 10)` on a `Date` built from
+local year/month/day components to get a comparison key — for any
+positive UTC offset (Riyadh included) this silently shifts the date back
+a day before the string comparison ever runs. When bucketing a
+locally-constructed calendar day against a UTC-stored timestamp, compare
+via `.toDateString()` on both sides (both evaluated in the same local
+timezone) instead of round-tripping either one through UTC. Verified live
+on the production site (`co-manager-seven.vercel.app/owner/schedule`,
+Month view) against the existing multi-branch test account after
+deploying the fix — all events now render on their correct date.
+
+---
+
+### BUG #038 — Owner Dashboard and Reports Pages Never Subscribed to task_item_submissions — Live Updates Stalled Until a Whole Multi-Item Task Finished
+**Severity:** MEDIUM (realtime plumbing works overall — BUG#023/#034 not
+reintroduced — this is a narrower granularity gap, not a full outage)
+**Area/File:** `app/owner/(authenticated)/dashboard/page.tsx`,
+`app/owner/(authenticated)/reports/page.tsx`
+
+**Found during:** the same 2026-08-05 QA pass, proving realtime with a
+controlled before/after test — owner Dashboard (and separately, Reports
+with a branch filter applied) left open in one session, a branch manager
+completing a 4-item checklist one item at a time in another, no manual
+refresh at any point. Completing item 1, 2, or 3 of 4 produced **zero**
+visible change on either page. Only completing the 4th (final) item — the
+one that rolls the parent `task_submissions` row from `pending` to
+`completed`, comanager-logic §4's rollup rule — triggered a live update
+(stat cards, daily-progress bar, Recent Activity on Dashboard; KPIs and
+charts, filter preserved, on Reports).
+
+**The problem:** both pages call `useRealtimeTable` scoped to
+`task_submissions` and `food_safety_submissions` only. Neither subscribed
+to `task_item_submissions`. A single checklist item completing only
+writes to `task_item_submissions` — the parent `task_submissions` row is
+untouched until every item underneath it is done — so on these two pages
+specifically, nothing ever fired until that last write happened to be the
+row-flipping one. `app/owner/(authenticated)/tasks/page.tsx` already had
+this exact subscription (added for BUG#036's item-level %-badge fix, its
+`owner-tasks-items-*` channel) — Dashboard and Reports were just never
+given the same one.
+
+**WRONG:**
+```ts
+// Dashboard
+useRealtimeTable(client, `owner-dashboard-${profile?.id ?? "anon"}`, "task_submissions", loadData);
+useRealtimeTable(client, `owner-dashboard-fs-${profile?.id ?? "anon"}`, "food_safety_submissions", loadData);
+// no task_item_submissions subscription — item-level writes never trigger loadData
+```
+
+**CORRECT:**
+```ts
+// Dashboard
+useRealtimeTable(client, `owner-dashboard-${profile?.id ?? "anon"}`, "task_submissions", loadData);
+useRealtimeTable(client, `owner-dashboard-fs-${profile?.id ?? "anon"}`, "food_safety_submissions", loadData);
+useRealtimeTable(client, `owner-dashboard-items-${profile?.id ?? "anon"}`, "task_item_submissions", loadData);
+```
+(Reports got the same addition, routed through its existing debounced
+`scheduleBackgroundReload` callback rather than a bare `loadData` — that
+page already batches realtime-triggered refetches over a 1.5s window
+since its query range can span up to ~180 days, per its own inline
+comment; the new subscription reuses that same debounce, not a separate
+one.)
+
+**Rule:** Any page whose displayed data can change via
+`task_item_submissions` (directly, or indirectly by that table's changes
+eventually flipping a `task_submissions` row) needs its own realtime
+subscription to that table, matching whatever refresh callback the page
+already uses for `task_submissions` — don't assume the parent row's own
+subscription is enough; the two tables change independently and a
+multi-item checklist can sit mid-completion for an arbitrary amount of
+time. Verified live: deployed the fix, repeated the identical partial-item
+completion test against the production site's existing multi-branch test
+account, and confirmed both pages now update within about a second of
+each individual item being marked done, not just the last one.
+
+---
+
+### BUG #039 — "Completion by Category" Bucketed by an Unused tasks.category Field Instead of Tasks/Food Safety/Schedule
+**Severity:** LOW (display-only, showed a technically-correct but
+uninformative single "Uncategorized" row instead of being wrong data)
+**Area/File:** `app/owner/(authenticated)/dashboard/page.tsx`
+
+**Found during:** the same 2026-08-05 QA pass, comparing the Dashboard
+against comanager-design-match's own spec for this exact widget: "per
+category (Tasks/Food Safety/Schedule) with % label." The live widget
+showed exactly one row, "Uncategorized," at whatever the overall task
+completion rate happened to be.
+
+**The problem:** the widget grouped today's `task_submissions` rows by
+`tasks.category` — a real column, but one no task-creation UI anywhere in
+the app ever exposes a way to set (comanager-logic §7's low-friction
+creation modal has title/frequency/scope/items, no category field), so
+every task's `category` was `null` and fell into a single "Uncategorized"
+bucket. Food Safety and Schedule data were never read by this widget at
+all, despite being named directly in the design spec as two of the three
+rows it's supposed to show.
+
+**Founder-clarified before fixing:** `schedule_events` has no
+status/completion column at all (it's a plain calendar booking, not a
+recurring submission) — asked the founder how to define a "Schedule
+completion %" with no existing concept to reuse; confirmed: percentage of
+today's events whose `end_time` has already passed.
+
+**WRONG:**
+```ts
+const categoryOf = new Map(tasks.map((t) => [t.id, t.category ?? "Uncategorized"]));
+const categoryBuckets = new Map<string, { completed: number; total: number }>();
+todaySubs.forEach((s) => {
+  const cat = categoryOf.get(s.task_id) ?? "Uncategorized"; // always "Uncategorized" —
+  const b = categoryBuckets.get(cat) ?? { completed: 0, total: 0 }; // no UI ever sets tasks.category
+  b.total += 1;
+  if (s.status === "completed") b.completed += 1;
+  categoryBuckets.set(cat, b);
+});
+const categoryRates = Array.from(categoryBuckets.entries()).map(([cat, v]) => ({
+  category: cat,
+  rate: calcRate(v.completed, v.total),
+}));
+```
+
+**CORRECT:**
+```ts
+// Three fixed rows, matching comanager-design-match exactly, each computed
+// from the feature area's own submission data — not a task-level field.
+const todayFsSubs = fsSubs.filter((s) => s.due_date === today);
+// "Completion" = a reading was submitted (pass or fail both count) — same
+// submitted-vs-not semantic as Tasks, deliberately NOT the same number as
+// Reports' separate "Food Safety Compliance" (pass-rate) KPI.
+const fsCompletedToday = todayFsSubs.filter((s) => s.result === "pass" || s.result === "fail").length;
+const now = new Date();
+const scheduleCompletedToday = todaySchedule.filter((e) => new Date(e.end_time) < now).length;
+
+const categoryRates = [
+  { category: "Tasks", rate: calcRate(completedToday, todaySubs.length) },
+  { category: "Food Safety", rate: calcRate(fsCompletedToday, todayFsSubs.length) },
+  { category: "Schedule", rate: calcRate(scheduleCompletedToday, todaySchedule.length) },
+];
+```
+`todaySchedule` is a new, separately-fetched state — `schedule_events`
+rows whose `start_time` falls within today's *Riyadh* calendar day
+(queried over a 1-day-buffered UTC window, then trimmed precisely via
+`riyadhDateString()` equality, same two-step pattern
+`lib/utils/riyadh-date.ts` documents — never a bare UTC-day query against
+a Riyadh-local concept, per BUG#030).
+
+**Rule:** When a widget's spec names specific categories, don't infer the
+grouping key from whatever column happens to exist on the most
+conveniently-already-fetched table — check whether that column actually
+has a UI path to be populated before trusting it as a real dimension.
+`tasks.category` existing in the schema was never evidence it was in use.
+Verified live: deployed the fix, reloaded the Dashboard against the
+production site's existing multi-branch test account, and confirmed all
+three named rows (Tasks/Food Safety/Schedule) render with independently
+correct percentages matching the actual submission/event data.
+
+---
+
 ## ➕ HOW TO ADD A NEW BUG
 
 When you fix a new bug, add it at the bottom of the relevant severity

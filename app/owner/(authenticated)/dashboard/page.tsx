@@ -14,7 +14,6 @@ interface Branch {
 interface TaskDef {
   id: string;
   title: string;
-  category: string | null;
 }
 interface TaskSub {
   id: string;
@@ -44,6 +43,15 @@ interface EventRow {
   branch_id: string | null;
   start_time: string;
 }
+// Just enough to compute the Schedule row of "Completion by category" — a
+// schedule_event has no status column (comanager-context: it's a plain
+// calendar booking), so "completion" here means "this event's scheduled
+// window has already passed" — the only signal the schema actually has.
+interface TodayEventRow {
+  id: string;
+  start_time: string;
+  end_time: string;
+}
 
 const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -59,6 +67,7 @@ export default function OwnerDashboardPage() {
   const [standards, setStandards] = useState<FsStandard[]>([]);
   const [fsSubs, setFsSubs] = useState<FsSub[]>([]);
   const [events, setEvents] = useState<EventRow[]>([]);
+  const [todaySchedule, setTodaySchedule] = useState<TodayEventRow[]>([]);
   const [managerNames, setManagerNames] = useState<Record<string, string>>({});
   const [dataLoading, setDataLoading] = useState(true);
 
@@ -66,27 +75,38 @@ export default function OwnerDashboardPage() {
     setDataLoading(true);
     const since = riyadhDaysAgoString(6);
     const nowIso = new Date().toISOString();
+    const today = riyadhDateString();
 
-    const [branchRes, taskRes, taskSubRes, standardRes, fsSubRes, eventRes, managerRes] = await Promise.all([
-      client.from("branches").select("id, name, is_active"),
-      client.from("tasks").select("id, title, category"),
-      client
-        .from("task_submissions")
-        .select("id, task_id, branch_id, status, due_date, submitted_at, submitted_by")
-        .gte("due_date", since),
-      client.from("food_safety_standards").select("id, title"),
-      client
-        .from("food_safety_submissions")
-        .select("id, standard_id, branch_id, result, due_date, submitted_at, submitted_by")
-        .gte("due_date", since),
-      client
-        .from("schedule_events")
-        .select("id, title, branch_id, start_time")
-        .gte("start_time", nowIso)
-        .order("start_time")
-        .limit(5),
-      client.from("users").select("id, name").eq("role", "branch_manager"),
-    ]);
+    const [branchRes, taskRes, taskSubRes, standardRes, fsSubRes, eventRes, todayScheduleRes, managerRes] =
+      await Promise.all([
+        client.from("branches").select("id, name, is_active"),
+        client.from("tasks").select("id, title"),
+        client
+          .from("task_submissions")
+          .select("id, task_id, branch_id, status, due_date, submitted_at, submitted_by")
+          .gte("due_date", since),
+        client.from("food_safety_standards").select("id, title"),
+        client
+          .from("food_safety_submissions")
+          .select("id, standard_id, branch_id, result, due_date, submitted_at, submitted_by")
+          .gte("due_date", since),
+        client
+          .from("schedule_events")
+          .select("id, title, branch_id, start_time")
+          .gte("start_time", nowIso)
+          .order("start_time")
+          .limit(5),
+        // Wider-than-strictly-needed window (yesterday through tomorrow, UTC
+        // bounds) so the Riyadh-vs-UTC day boundary can never clip today's
+        // events, then trimmed to exactly today's Riyadh calendar day below —
+        // same two-step pattern as riyadh-date.ts's own doc comment describes.
+        client
+          .from("schedule_events")
+          .select("id, start_time, end_time")
+          .gte("start_time", `${riyadhDaysAgoString(1)}T00:00:00.000Z`)
+          .lte("start_time", `${riyadhDaysAgoString(-1)}T23:59:59.999Z`),
+        client.from("users").select("id, name").eq("role", "branch_manager"),
+      ]);
 
     setBranches(branchRes.data ?? []);
     setTasks(taskRes.data ?? []);
@@ -94,6 +114,9 @@ export default function OwnerDashboardPage() {
     setStandards(standardRes.data ?? []);
     setFsSubs(fsSubRes.data ?? []);
     setEvents(eventRes.data ?? []);
+    setTodaySchedule(
+      (todayScheduleRes.data ?? []).filter((e) => riyadhDateString(new Date(e.start_time)) === today),
+    );
     const names: Record<string, string> = {};
     (managerRes.data ?? []).forEach((m) => {
       names[m.id] = m.name;
@@ -108,6 +131,12 @@ export default function OwnerDashboardPage() {
 
   useRealtimeTable(client, `owner-dashboard-${profile?.id ?? "anon"}`, "task_submissions", loadData);
   useRealtimeTable(client, `owner-dashboard-fs-${profile?.id ?? "anon"}`, "food_safety_submissions", loadData);
+  // A single checklist item completing only touches task_item_submissions —
+  // the parent task_submissions row stays "pending" until every item is
+  // done (comanager-logic §4) — so without this, "Completed today" and
+  // Recent Activity silently lag until a whole multi-item task finishes.
+  // Same gap already fixed on the Tasks page's "owner-tasks-items-*" channel.
+  useRealtimeTable(client, `owner-dashboard-items-${profile?.id ?? "anon"}`, "task_item_submissions", loadData);
 
   if (loading || !profile) {
     return <main className="p-8 text-sm text-ink/60">Loading...</main>;
@@ -127,19 +156,24 @@ export default function OwnerDashboardPage() {
     return { day: DAY_LABELS[parseDueDate(key).getUTCDay()], rate: calcRate(completed, rows.length) };
   });
 
-  const categoryOf = new Map(tasks.map((t) => [t.id, t.category ?? "Uncategorized"]));
-  const categoryBuckets = new Map<string, { completed: number; total: number }>();
-  todaySubs.forEach((s) => {
-    const cat = categoryOf.get(s.task_id) ?? "Uncategorized";
-    const b = categoryBuckets.get(cat) ?? { completed: 0, total: 0 };
-    b.total += 1;
-    if (s.status === "completed") b.completed += 1;
-    categoryBuckets.set(cat, b);
-  });
-  const categoryRates = Array.from(categoryBuckets.entries()).map(([cat, v]) => ({
-    category: cat,
-    rate: calcRate(v.completed, v.total),
-  }));
+  // comanager-design-match: "Completion by category" is the three feature
+  // areas (Tasks/Food Safety/Schedule), not tasks.category (a free-text
+  // column no creation UI ever exposes, so every task defaulted to
+  // "Uncategorized" and Food Safety/Schedule never appeared here at all).
+  const todayFsSubs = fsSubs.filter((s) => s.due_date === today);
+  // "Completion" here means "a reading was submitted" (pass or fail both
+  // count), same submitted-vs-not semantic as tasks — this is deliberately
+  // NOT the same number as Reports' "Food Safety Compliance" KPI, which
+  // measures the pass rate instead.
+  const fsCompletedToday = todayFsSubs.filter((s) => s.result === "pass" || s.result === "fail").length;
+  const now = new Date();
+  const scheduleCompletedToday = todaySchedule.filter((e) => new Date(e.end_time) < now).length;
+
+  const categoryRates = [
+    { category: "Tasks", rate: calcRate(completedToday, todaySubs.length) },
+    { category: "Food Safety", rate: calcRate(fsCompletedToday, todayFsSubs.length) },
+    { category: "Schedule", rate: calcRate(scheduleCompletedToday, todaySchedule.length) },
+  ];
 
   interface ActivityItem {
     id: string;
@@ -220,22 +254,18 @@ export default function OwnerDashboardPage() {
             <div className="rounded-lg bg-card p-4 shadow-sm">
               <h2 className="font-display text-sm">Completion by category</h2>
               <div className="mt-3 flex flex-col gap-2">
-                {categoryRates.length === 0 ? (
-                  <p className="text-sm text-ink/50">No data today yet.</p>
-                ) : (
-                  categoryRates.map((c) => (
-                    <div key={c.category} className="flex items-center gap-2">
-                      <span className="w-28 truncate text-sm">{c.category}</span>
-                      <div className="h-3 flex-1 rounded-pill bg-ink/10">
-                        <div
-                          className="h-3 rounded-pill"
-                          style={{ width: `${c.rate}%`, backgroundColor: completionColor(c.rate) }}
-                        />
-                      </div>
-                      <span className="w-10 text-right font-mono text-xs">{c.rate}%</span>
+                {categoryRates.map((c) => (
+                  <div key={c.category} className="flex items-center gap-2">
+                    <span className="w-28 truncate text-sm">{c.category}</span>
+                    <div className="h-3 flex-1 rounded-pill bg-ink/10">
+                      <div
+                        className="h-3 rounded-pill"
+                        style={{ width: `${c.rate}%`, backgroundColor: completionColor(c.rate) }}
+                      />
                     </div>
-                  ))
-                )}
+                    <span className="w-10 text-right font-mono text-xs">{c.rate}%</span>
+                  </div>
+                ))}
               </div>
             </div>
           </div>
