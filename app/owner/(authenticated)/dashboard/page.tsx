@@ -49,6 +49,7 @@ interface EventRow {
 // window has already passed" — the only signal the schema actually has.
 interface TodayEventRow {
   id: string;
+  branch_id: string | null;
   start_time: string;
   end_time: string;
 }
@@ -69,6 +70,12 @@ export default function OwnerDashboardPage() {
   const [events, setEvents] = useState<EventRow[]>([]);
   const [todaySchedule, setTodaySchedule] = useState<TodayEventRow[]>([]);
   const [managerNames, setManagerNames] = useState<Record<string, string>>({});
+  // "" = All Branches. Client-side only, same pattern as the Reports page's
+  // own branchFilter — loadData always fetches every branch's data
+  // (RLS already scopes it to this owner), so switching branches is
+  // instant with no refetch, and the realtime subscriptions below never
+  // need to know about this filter at all.
+  const [branchFilter, setBranchFilter] = useState<string>("");
   const [dataLoading, setDataLoading] = useState(true);
 
   const loadData = useCallback(async () => {
@@ -102,7 +109,7 @@ export default function OwnerDashboardPage() {
         // same two-step pattern as riyadh-date.ts's own doc comment describes.
         client
           .from("schedule_events")
-          .select("id, start_time, end_time")
+          .select("id, branch_id, start_time, end_time")
           .gte("start_time", `${riyadhDaysAgoString(1)}T00:00:00.000Z`)
           .lte("start_time", `${riyadhDaysAgoString(-1)}T23:59:59.999Z`),
         client.from("users").select("id, name").eq("role", "branch_manager"),
@@ -142,16 +149,43 @@ export default function OwnerDashboardPage() {
     return <main className="p-8 text-sm text-ink/60">Loading...</main>;
   }
 
+  // comanager-design-match's documented branch filter, built for the first
+  // time here — every section below derives from these filtered arrays
+  // rather than the raw fetched state, so loadData/the realtime
+  // subscriptions above never need to know a filter exists. task_submissions
+  // and food_safety_submissions rows always carry a concrete (non-null)
+  // branch_id (one row per branch, even for an all-branches task/standard
+  // definition), so a plain equality filter is correct for those. Schedule
+  // events keep branch_id nullable for "all branches" — filtering those
+  // must keep null rows too (comanager-conventions' .or(branch_id.eq.X,
+  // branch_id.is.null) rule / BUG#007), or a global event would wrongly
+  // disappear the moment a single branch is selected.
+  const filteredTaskSubs = branchFilter ? taskSubs.filter((s) => s.branch_id === branchFilter) : taskSubs;
+  const filteredFsSubs = branchFilter ? fsSubs.filter((s) => s.branch_id === branchFilter) : fsSubs;
+  const filteredEvents = branchFilter
+    ? events.filter((e) => e.branch_id === branchFilter || e.branch_id === null)
+    : events;
+  const filteredTodaySchedule = branchFilter
+    ? todaySchedule.filter((e) => e.branch_id === branchFilter || e.branch_id === null)
+    : todaySchedule;
+
   const today = riyadhDateString();
-  const todaySubs = taskSubs.filter((s) => s.due_date === today);
+  const todaySubs = filteredTaskSubs.filter((s) => s.due_date === today);
   const completedToday = todaySubs.filter((s) => s.status === "completed").length;
   const pendingToday = todaySubs.filter((s) => s.status === "pending").length;
   const missedToday = todaySubs.filter((s) => s.status === "missed").length;
-  const activeBranches = branches.filter((b) => b.is_active).length;
+  // Filtered to a single branch, "how many active branches" collapses to
+  // "is this one" (1 or 0) rather than staying the account-wide total —
+  // every stat card follows the filter, this one included.
+  const activeBranches = branchFilter
+    ? branches.find((b) => b.id === branchFilter)?.is_active
+      ? 1
+      : 0
+    : branches.filter((b) => b.is_active).length;
 
   const dailyProgress = Array.from({ length: 7 }).map((_, i) => {
     const key = riyadhDaysAgoString(6 - i);
-    const rows = taskSubs.filter((s) => s.due_date === key);
+    const rows = filteredTaskSubs.filter((s) => s.due_date === key);
     const completed = rows.filter((s) => s.status === "completed").length;
     return { day: DAY_LABELS[parseDueDate(key).getUTCDay()], rate: calcRate(completed, rows.length) };
   });
@@ -160,19 +194,19 @@ export default function OwnerDashboardPage() {
   // areas (Tasks/Food Safety/Schedule), not tasks.category (a free-text
   // column no creation UI ever exposes, so every task defaulted to
   // "Uncategorized" and Food Safety/Schedule never appeared here at all).
-  const todayFsSubs = fsSubs.filter((s) => s.due_date === today);
+  const todayFsSubs = filteredFsSubs.filter((s) => s.due_date === today);
   // "Completion" here means "a reading was submitted" (pass or fail both
   // count), same submitted-vs-not semantic as tasks — this is deliberately
   // NOT the same number as Reports' "Food Safety Compliance" KPI, which
   // measures the pass rate instead.
   const fsCompletedToday = todayFsSubs.filter((s) => s.result === "pass" || s.result === "fail").length;
   const now = new Date();
-  const scheduleCompletedToday = todaySchedule.filter((e) => new Date(e.end_time) < now).length;
+  const scheduleCompletedToday = filteredTodaySchedule.filter((e) => new Date(e.end_time) < now).length;
 
   const categoryRates = [
     { category: "Tasks", rate: calcRate(completedToday, todaySubs.length) },
     { category: "Food Safety", rate: calcRate(fsCompletedToday, todayFsSubs.length) },
-    { category: "Schedule", rate: calcRate(scheduleCompletedToday, todaySchedule.length) },
+    { category: "Schedule", rate: calcRate(scheduleCompletedToday, filteredTodaySchedule.length) },
   ];
 
   interface ActivityItem {
@@ -183,7 +217,7 @@ export default function OwnerDashboardPage() {
     when: string;
   }
   const activity: ActivityItem[] = [
-    ...taskSubs
+    ...filteredTaskSubs
       .filter((s) => s.submitted_at)
       .map((s) => ({
         id: `t-${s.id}`,
@@ -192,7 +226,7 @@ export default function OwnerDashboardPage() {
         who: managerNames[s.submitted_by ?? ""] ?? "Someone",
         when: s.submitted_at!,
       })),
-    ...fsSubs
+    ...filteredFsSubs
       .filter((s) => s.submitted_at)
       .map((s) => ({
         id: `f-${s.id}`,
@@ -212,15 +246,43 @@ export default function OwnerDashboardPage() {
     { label: "Active branches", value: activeBranches, border: "border-green" },
   ];
 
+  const filteredBranchName = branchFilter ? (branches.find((b) => b.id === branchFilter)?.name ?? "") : "";
+
   return (
     <main className="p-8">
-      <div className="flex items-center gap-2">
-        <h1 className="font-display text-2xl">Dashboard</h1>
-        <span className="rounded-pill bg-red px-2 py-0.5 font-mono text-[10px] font-bold uppercase text-cream">
-          Live
-        </span>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <h1 className="font-display text-2xl">Dashboard</h1>
+          <span className="rounded-pill bg-red px-2 py-0.5 font-mono text-[10px] font-bold uppercase text-cream">
+            Live
+          </span>
+        </div>
+        {/* comanager-design-match: "Branch filter dropdown in the top right
+            of most owner pages, not just dashboard" — same select markup
+            as the Reports page's GlobalReportFilters, minus the time-range
+            toggle (this page has no range concept, it's always "today"). */}
+        <label className="flex items-center gap-2 text-sm">
+          <span className="sr-only">Branch</span>
+          <select
+            value={branchFilter}
+            onChange={(e) => setBranchFilter(e.target.value)}
+            aria-label="Branch filter"
+            className="min-h-[44px] rounded border p-2 text-sm"
+          >
+            <option value="">All Branches</option>
+            {branches
+              .filter((b) => b.is_active)
+              .map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.name}
+                </option>
+              ))}
+          </select>
+        </label>
       </div>
-      <p className="text-sm text-ink/70">Live view across every branch</p>
+      <p className="text-sm text-ink/70">
+        {branchFilter ? `Live view — ${filteredBranchName}` : "Live view across every branch"}
+      </p>
 
       {dataLoading ? (
         <p className="mt-6 text-sm text-ink/60">Loading...</p>
@@ -274,10 +336,10 @@ export default function OwnerDashboardPage() {
             <div className="rounded-lg bg-card p-4 shadow-sm">
               <h2 className="font-display text-sm">Next events</h2>
               <div className="mt-3 flex flex-col gap-2">
-                {events.length === 0 ? (
+                {filteredEvents.length === 0 ? (
                   <p className="text-sm text-ink/50">No upcoming events.</p>
                 ) : (
-                  events.map((e) => (
+                  filteredEvents.map((e) => (
                     <div key={e.id} className="flex justify-between text-sm">
                       <span>{e.title}</span>
                       <span className="text-ink/60">{new Date(e.start_time).toLocaleString()}</span>
