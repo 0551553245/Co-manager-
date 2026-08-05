@@ -6,12 +6,14 @@ import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { calcRate, completionBackgroundColor, completionColor } from "@/lib/utils/completion";
 import { riyadhDateString, riyadhDaysAgoString } from "@/lib/utils/riyadh-date";
 import { generateImmediateTaskSlot } from "@/lib/slots/generate-immediate-slot";
+import { useActiveBranchShifts } from "@/lib/hooks/useBranchShifts";
 import { PhotoLightbox } from "@/components/PhotoLightbox";
 import { TaskModal, type TaskFormValues, type TaskItemFormValues } from "./TaskModal";
 
 interface Task {
   id: string;
   branch_id: string | null;
+  shift_id: string | null;
   title: string;
   title_ar: string | null;
   description: string | null;
@@ -95,6 +97,7 @@ export default function TasksPage() {
   const [expandedLoading, setExpandedLoading] = useState(false);
   const [expandedRows, setExpandedRows] = useState<ExpandedRow[]>([]);
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
+  const { shiftsByBranch } = useActiveBranchShifts(client, !loading && !!profile);
 
   // The card %-badge is item-level (2026-08-05 fix — see comanager-bug-log
   // BUG#036): a single-branch task has exactly one task_submissions row per
@@ -128,7 +131,9 @@ export default function TasksPage() {
       client.from("branches").select("id, name").eq("is_active", true).order("name"),
       client
         .from("tasks")
-        .select("id, branch_id, title, title_ar, description, description_ar, category, frequency, is_active")
+        .select(
+          "id, branch_id, shift_id, title, title_ar, description, description_ar, category, frequency, is_active",
+        )
         .order("created_at", { ascending: false }),
       client
         .from("task_items")
@@ -338,6 +343,7 @@ export default function TasksPage() {
       title_ar: task.title_ar ?? "",
       frequency: task.frequency,
       branchId: task.branch_id ?? "",
+      shiftId: task.shift_id ?? "",
       description: task.description ?? "",
       description_ar: task.description_ar ?? "",
       category: task.category ?? "",
@@ -390,12 +396,19 @@ export default function TasksPage() {
 
   async function handleCreate(values: TaskFormValues): Promise<string | void> {
     if (!values.title.trim()) return "Title is required.";
+    // Backstop, not the real guarantee — TaskModal already only lets a
+    // shift be picked once a specific branch is selected, and the DB has
+    // tasks_shift_requires_branch (comanager-logic §9) as the actual
+    // enforcement. This just surfaces a friendlier message than the raw
+    // constraint error if it's ever reached anyway.
+    if (values.shiftId && !values.branchId) return "A shift-scoped task must be scoped to a single branch.";
     const { data, error } = await client
       .from("tasks")
       .insert({
         owner_id: profile!.id,
         created_by: profile!.id,
         branch_id: values.branchId || null,
+        shift_id: values.shiftId || null,
         title: values.title,
         title_ar: values.title_ar || null,
         description: values.description || null,
@@ -427,10 +440,12 @@ export default function TasksPage() {
     // Edits apply going forward only — never touches existing
     // task_submissions / task_item_submissions rows (comanager-logic §7).
     if (!values.title.trim()) return "Title is required.";
+    if (values.shiftId && !values.branchId) return "A shift-scoped task must be scoped to a single branch.";
     const { error } = await client
       .from("tasks")
       .update({
         branch_id: values.branchId || null,
+        shift_id: values.shiftId || null,
         title: values.title,
         title_ar: values.title_ar || null,
         description: values.description || null,
@@ -653,6 +668,7 @@ export default function TasksPage() {
           title="New task"
           submitLabel="Create task"
           branches={branches}
+          shiftsByBranch={shiftsByBranch}
           onCancel={() => setModal(null)}
           onSubmit={handleCreate}
         />
@@ -662,6 +678,7 @@ export default function TasksPage() {
           title="Edit task"
           submitLabel="Save changes"
           branches={branches}
+          shiftsByBranch={shiftsByBranch}
           initial={taskToFormValues(modal.task)}
           onCancel={() => setModal(null)}
           onSubmit={(values) => handleEdit(modal.task.id, values)}
@@ -672,6 +689,7 @@ export default function TasksPage() {
           title="Duplicate task"
           submitLabel="Create task"
           branches={branches}
+          shiftsByBranch={shiftsByBranch}
           initial={taskToDuplicateFormValues(modal.task)}
           onCancel={() => setModal(null)}
           onSubmit={handleCreate}

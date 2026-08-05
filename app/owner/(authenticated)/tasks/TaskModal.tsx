@@ -21,6 +21,7 @@ export interface TaskFormValues {
   title_ar: string;
   frequency: "daily" | "weekly" | "monthly";
   branchId: string; // "" = all branches (null)
+  shiftId: string; // "" = every shift the branch has (null) — comanager-logic §9
   description: string;
   description_ar: string;
   category: string;
@@ -44,6 +45,7 @@ const DEFAULTS: TaskFormValues = {
   title_ar: "",
   frequency: "daily",
   branchId: "",
+  shiftId: "",
   description: "",
   description_ar: "",
   category: "",
@@ -54,6 +56,14 @@ interface TaskModalProps {
   title: string;
   submitLabel: string;
   branches: { id: string; name: string }[];
+  // comanager-logic §9: shift scoping only makes sense once a specific
+  // branch is picked (an all-branches task can't be pinned to one
+  // branch's shift — enforced at the DB layer too, see
+  // tasks_shift_requires_branch), and only shown once that branch has
+  // 2+ active shifts — with exactly one shift, "unscoped" and "scoped to
+  // that one shift" are behaviorally identical, so showing a dropdown
+  // with one real choice is pure friction for zero difference.
+  shiftsByBranch: Record<string, { id: string; name: string }[]>;
   initial?: Partial<TaskFormValues>;
   onCancel: () => void;
   onSubmit: (values: TaskFormValues) => Promise<string | void>;
@@ -65,7 +75,15 @@ interface TaskModalProps {
 // food-safety standards, and schedule events. Items themselves stay
 // visible by default (not collapsed) since a task with zero items is
 // meaningless now — they're the point of a checklist, not an extra.
-export function TaskModal({ title, submitLabel, branches, initial, onCancel, onSubmit }: TaskModalProps) {
+export function TaskModal({
+  title,
+  submitLabel,
+  branches,
+  shiftsByBranch,
+  initial,
+  onCancel,
+  onSubmit,
+}: TaskModalProps) {
   const [values, setValues] = useState<TaskFormValues>({
     ...DEFAULTS,
     ...initial,
@@ -78,6 +96,16 @@ export function TaskModal({ title, submitLabel, branches, initial, onCancel, onS
 
   function set<K extends keyof TaskFormValues>(key: K, value: TaskFormValues[K]) {
     setValues((v) => ({ ...v, [key]: value }));
+  }
+
+  const shiftOptions = values.branchId ? (shiftsByBranch[values.branchId] ?? []) : [];
+  const shiftUIVisible = shiftOptions.length >= 2;
+
+  function setBranchId(branchId: string) {
+    // Switching scope away from a branch (or to one without 2+ shifts)
+    // hides the Shift field — clear any stale selection along with it
+    // rather than silently submitting a value the owner can no longer see.
+    setValues((v) => ({ ...v, branchId, shiftId: "" }));
   }
 
   function setItem(index: number, patch: Partial<TaskItemFormValues>) {
@@ -124,7 +152,12 @@ export function TaskModal({ title, submitLabel, branches, initial, onCancel, onS
       return;
     }
     setSubmitting(true);
-    const result = await onSubmit({ ...values, items: nonEmptyItems });
+    // Defensive, not just cosmetic: re-derived here rather than trusted
+    // from state, in case shiftsByBranch changed while this modal was
+    // open (e.g. the owner deactivated a shift in another tab) and left
+    // a stale shiftId behind that the now-hidden dropdown can't clear.
+    const submitShiftId = values.branchId && shiftOptions.length >= 2 ? values.shiftId : "";
+    const result = await onSubmit({ ...values, shiftId: submitShiftId, items: nonEmptyItems });
     setSubmitting(false);
     if (result) setError(result);
   }
@@ -163,7 +196,7 @@ export function TaskModal({ title, submitLabel, branches, initial, onCancel, onS
             Scope
             <select
               value={values.branchId}
-              onChange={(e) => set("branchId", e.target.value)}
+              onChange={(e) => setBranchId(e.target.value)}
               className="rounded border p-2"
             >
               <option value="">All branches</option>
@@ -174,6 +207,24 @@ export function TaskModal({ title, submitLabel, branches, initial, onCancel, onS
               ))}
             </select>
           </label>
+
+          {shiftUIVisible && (
+            <label className="flex flex-col gap-1 text-sm">
+              Shift
+              <select
+                value={values.shiftId}
+                onChange={(e) => set("shiftId", e.target.value)}
+                className="rounded border p-2"
+              >
+                <option value="">All shifts</option>
+                {shiftOptions.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
 
           <fieldset className="flex flex-col gap-2 text-sm">
             <legend className="mb-1">Checklist items</legend>

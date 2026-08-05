@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { BranchShiftsSection } from "./BranchShiftsSection";
 
 export interface BranchFormValues {
   name: string;
@@ -19,9 +21,22 @@ interface BranchModalProps {
   initial?: { [K in keyof BranchFormValues]?: string | null };
   onCancel: () => void;
   onSubmit: (values: BranchFormValues) => Promise<string | void>;
+  // Only present in edit mode — the Shifts section needs a real branch_id
+  // to attach rows to, which doesn't exist yet for a brand-new branch
+  // (comanager-logic §9: shift config lives inside Branches → Edit branch).
+  branchId?: string;
+  client?: SupabaseClient;
 }
 
-export function BranchModal({ title, submitLabel, initial, onCancel, onSubmit }: BranchModalProps) {
+export function BranchModal({
+  title,
+  submitLabel,
+  initial,
+  onCancel,
+  onSubmit,
+  branchId,
+  client,
+}: BranchModalProps) {
   const [values, setValues] = useState<BranchFormValues>({
     name: initial?.name ?? "",
     name_ar: initial?.name_ar ?? "",
@@ -105,6 +120,8 @@ export function BranchModal({ title, submitLabel, initial, onCancel, onSubmit }:
               className="rounded border p-2"
             />
           </label>
+
+          {branchId && client && <BranchShiftsSection branchId={branchId} client={client} />}
 
           <div className="mt-2 flex justify-end gap-2">
             <button type="button" onClick={onCancel} className="rounded border px-4 py-2 text-sm">

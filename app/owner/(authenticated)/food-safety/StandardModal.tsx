@@ -7,6 +7,7 @@ export interface StandardFormValues {
   title_ar: string;
   check_frequency: "daily" | "weekly" | "monthly";
   branchId: string; // "" = all branches (null)
+  shiftId: string; // "" = every shift the branch has (null) — comanager-logic §9
   requiresPhoto: boolean;
   requiresNote: boolean;
   description: string;
@@ -20,6 +21,7 @@ const DEFAULTS: StandardFormValues = {
   title_ar: "",
   check_frequency: "daily",
   branchId: "",
+  shiftId: "",
   requiresPhoto: false,
   requiresNote: false,
   description: "",
@@ -32,6 +34,9 @@ interface StandardModalProps {
   title: string;
   submitLabel: string;
   branches: { id: string; name: string }[];
+  // Same rule as TaskModal: only shown once a specific branch is picked
+  // and that branch has 2+ active shifts (comanager-logic §9).
+  shiftsByBranch: Record<string, { id: string; name: string }[]>;
   initial?: Partial<StandardFormValues>;
   onCancel: () => void;
   onSubmit: (values: StandardFormValues) => Promise<string | void>;
@@ -45,6 +50,7 @@ export function StandardModal({
   title,
   submitLabel,
   branches,
+  shiftsByBranch,
   initial,
   onCancel,
   onSubmit,
@@ -58,11 +64,21 @@ export function StandardModal({
     setValues((v) => ({ ...v, [key]: value }));
   }
 
+  const shiftOptions = values.branchId ? (shiftsByBranch[values.branchId] ?? []) : [];
+  const shiftUIVisible = shiftOptions.length >= 2;
+
+  function setBranchId(branchId: string) {
+    setValues((v) => ({ ...v, branchId, shiftId: "" }));
+  }
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setSubmitting(true);
     setError(null);
-    const result = await onSubmit(values);
+    // Defensive re-derivation, same reasoning as TaskModal — guards
+    // against shiftsByBranch changing while this modal was open.
+    const submitShiftId = values.branchId && shiftOptions.length >= 2 ? values.shiftId : "";
+    const result = await onSubmit({ ...values, shiftId: submitShiftId });
     setSubmitting(false);
     if (result) setError(result);
   }
@@ -101,7 +117,7 @@ export function StandardModal({
             Scope
             <select
               value={values.branchId}
-              onChange={(e) => set("branchId", e.target.value)}
+              onChange={(e) => setBranchId(e.target.value)}
               className="rounded border p-2"
             >
               <option value="">All branches</option>
@@ -112,6 +128,24 @@ export function StandardModal({
               ))}
             </select>
           </label>
+
+          {shiftUIVisible && (
+            <label className="flex flex-col gap-1 text-sm">
+              Shift
+              <select
+                value={values.shiftId}
+                onChange={(e) => set("shiftId", e.target.value)}
+                className="rounded border p-2"
+              >
+                <option value="">All shifts</option>
+                {shiftOptions.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
 
           <div className="flex gap-2">
             <label className="flex flex-1 flex-col gap-1 text-sm">

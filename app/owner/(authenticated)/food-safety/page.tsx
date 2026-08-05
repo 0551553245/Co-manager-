@@ -6,10 +6,12 @@ import { useRealtimeTable } from "@/lib/supabase/use-realtime";
 import { StandardModal, type StandardFormValues } from "./StandardModal";
 import { riyadhDaysAgoString } from "@/lib/utils/riyadh-date";
 import { generateImmediateStandardSlot } from "@/lib/slots/generate-immediate-slot";
+import { useActiveBranchShifts } from "@/lib/hooks/useBranchShifts";
 
 interface Standard {
   id: string;
   branch_id: string | null;
+  shift_id: string | null;
   title: string;
   title_ar: string | null;
   description: string | null;
@@ -66,6 +68,7 @@ export default function FoodSafetyPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [modal, setModal] = useState<ModalState>(null);
   const [view, setView] = useState<"log" | "by-branch">("log");
+  const { shiftsByBranch } = useActiveBranchShifts(client, !loading && !!profile);
 
   const loadData = useCallback(async () => {
     setDataLoading(true);
@@ -77,7 +80,7 @@ export default function FoodSafetyPage() {
       client
         .from("food_safety_standards")
         .select(
-          "id, branch_id, title, title_ar, description, description_ar, check_frequency, temperature_min, temperature_max, requires_photo, requires_note, is_active",
+          "id, branch_id, shift_id, title, title_ar, description, description_ar, check_frequency, temperature_min, temperature_max, requires_photo, requires_note, is_active",
         )
         .order("created_at", { ascending: false }),
       client
@@ -128,6 +131,7 @@ export default function FoodSafetyPage() {
       title_ar: s.title_ar ?? "",
       check_frequency: s.check_frequency,
       branchId: s.branch_id ?? "",
+      shiftId: s.shift_id ?? "",
       requiresPhoto: s.requires_photo,
       requiresNote: s.requires_note,
       description: s.description ?? "",
@@ -139,12 +143,14 @@ export default function FoodSafetyPage() {
 
   async function handleCreate(values: StandardFormValues): Promise<string | void> {
     if (!values.title.trim()) return "Title is required.";
+    if (values.shiftId && !values.branchId) return "A shift-scoped standard must be scoped to a single branch.";
     const { data, error } = await client
       .from("food_safety_standards")
       .insert({
         owner_id: profile!.id,
         created_by: profile!.id,
         branch_id: values.branchId || null,
+        shift_id: values.shiftId || null,
         title: values.title,
         title_ar: values.title_ar || null,
         description: values.description || null,
@@ -171,10 +177,12 @@ export default function FoodSafetyPage() {
 
   async function handleEdit(standardId: string, values: StandardFormValues): Promise<string | void> {
     if (!values.title.trim()) return "Title is required.";
+    if (values.shiftId && !values.branchId) return "A shift-scoped standard must be scoped to a single branch.";
     const { error } = await client
       .from("food_safety_standards")
       .update({
         branch_id: values.branchId || null,
+        shift_id: values.shiftId || null,
         title: values.title,
         title_ar: values.title_ar || null,
         description: values.description || null,
@@ -414,6 +422,7 @@ export default function FoodSafetyPage() {
           title="New standard"
           submitLabel="Create standard"
           branches={branches}
+          shiftsByBranch={shiftsByBranch}
           onCancel={() => setModal(null)}
           onSubmit={handleCreate}
         />
@@ -423,6 +432,7 @@ export default function FoodSafetyPage() {
           title="Edit standard"
           submitLabel="Save changes"
           branches={branches}
+          shiftsByBranch={shiftsByBranch}
           initial={standardToFormValues(modal.standard)}
           onCancel={() => setModal(null)}
           onSubmit={(values) => handleEdit(modal.standard.id, values)}
@@ -433,6 +443,7 @@ export default function FoodSafetyPage() {
           title="Duplicate standard"
           submitLabel="Create standard"
           branches={branches}
+          shiftsByBranch={shiftsByBranch}
           initial={{ ...standardToFormValues(modal.standard), title: `${modal.standard.title} (copy)` }}
           onCancel={() => setModal(null)}
           onSubmit={handleCreate}

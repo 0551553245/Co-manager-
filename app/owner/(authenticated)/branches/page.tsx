@@ -237,6 +237,8 @@ export default function BranchesPage() {
           initial={modal.branch}
           onCancel={() => setModal(null)}
           onSubmit={(values) => handleEdit(modal.branch.id, values)}
+          branchId={modal.branch.id}
+          client={client}
         />
       )}
     </main>
