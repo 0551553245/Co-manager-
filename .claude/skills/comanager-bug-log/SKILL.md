@@ -2204,6 +2204,65 @@ surface.
 
 ---
 
+### BUG #041 — Manager's Shift Selection Appeared to Reset on Every Page Navigation
+**Severity:** HIGH (core Work Shifts interaction broken — a selection made on Dashboard was invisible on Tasks/Food Safety)
+**Area/File:** `lib/hooks/useManagerShift.ts` (Work Shifts, comanager-logic §9)
+
+**Found during:** live Stage 3 verification (2026-08-06) — selected
+"Morning" on a manager's Dashboard (visibly took effect, task list
+filtered correctly), then navigated to Tasks: the shift-scoped task was
+gone, only the shift-agnostic one remained, as if no shift had ever been
+selected.
+
+**The problem:** `useManagerShift` seeded its `currentShiftId` state
+from `profile.current_shift_id`, where `profile` comes from
+`usePanelAuthContext()`. BUG#031's own fix made every branch-manager
+page reuse the SAME `profile` object the panel layout fetched once at
+session start, specifically to stop each page re-running the identical
+auth query on every navigation. That optimization is correct for
+`profile` as a whole, but `current_shift_id` is different from the rest
+of the profile: unlike `branch_id`/`role`/`is_active`, it's expected to
+change *during* the session, from user action, on a *different* page
+than the one reading it. Dashboard's own hook instance updated its own
+local state correctly when `selectShift` ran — the visible effect on
+that page was real — but Tasks/Food Safety mount a brand-new
+`useManagerShift` instance on navigation, and each one re-seeded itself
+from the same stale `profile.current_shift_id` snapshot the layout had
+fetched before the manager ever touched the switcher.
+
+**WRONG:**
+```ts
+export function useManagerShift(client, profile, ready) {
+  const [currentShiftId, setCurrentShiftIdState] = useState(profile?.current_shift_id ?? null);
+  useEffect(() => {
+    setCurrentShiftIdState(profile?.current_shift_id ?? null); // profile never actually changes mid-session
+  }, [profile?.current_shift_id]);
+  ...
+}
+```
+
+**CORRECT:**
+```ts
+export function useManagerShift(client, profile, ready) {
+  const [currentShiftId, setCurrentShiftIdState] = useState<string | null>(null);
+  // Fetched directly, not derived from the cached profile snapshot — makes
+  // every page's own hook instance independently correct against the
+  // database, regardless of which page the shift was actually selected on.
+  useEffect(() => {
+    if (!ready || !profile) return;
+    let cancelled = false;
+    void client.from("users").select("current_shift_id").eq("id", profile.id).single()
+      .then(({ data }) => { if (!cancelled) setCurrentShiftIdState(data?.current_shift_id ?? null); });
+    return () => { cancelled = true; };
+  }, [client, profile, ready]);
+  ...
+}
+```
+
+**Rule:** BUG#031's "fetch the profile once, share it via context" pattern is correct for genuinely static session data (role, branch_id, is_active) but must NOT be extended to a field that's expected to change mid-session from the user's own actions on a different page than the one reading it — that field needs its own fetch, independent of whatever cached snapshot the rest of the profile rides on. When adding a new mutable-during-session column to a profile-shaped object, ask specifically whether every consumer of it needs to observe changes made by a *different* mounted instance, not just whether the initial value is correct.
+
+---
+
 ## ➕ HOW TO ADD A NEW BUG
 
 When you fix a new bug, add it at the bottom of the relevant severity

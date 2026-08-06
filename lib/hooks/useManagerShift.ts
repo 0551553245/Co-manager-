@@ -19,13 +19,32 @@ interface ManagerProfile {
 // current selection the same way, rather than three separate copies.
 export function useManagerShift(client: SupabaseClient, profile: ManagerProfile | null, ready: boolean) {
   const { shiftsByBranch } = useActiveBranchShifts(client, ready);
-  const [currentShiftId, setCurrentShiftIdState] = useState<string | null>(profile?.current_shift_id ?? null);
+  const [currentShiftId, setCurrentShiftIdState] = useState<string | null>(null);
 
-  // Profile is fetched once by the panel's own auth layer — sync our
-  // local copy whenever that resolves (e.g. on first load) or changes.
+  // Deliberately NOT seeded from `profile.current_shift_id` — the panel
+  // layout fetches `profile` exactly once per session (BUG#031: every
+  // page reuses that same context value rather than re-fetching on
+  // navigation), so a shift picked on Dashboard would otherwise look
+  // unselected the moment the manager navigates to Tasks/Food Safety,
+  // each mounting a fresh copy of this hook seeded from the same stale
+  // snapshot. Fetching it directly here makes every page's own hook
+  // instance independently correct against the database, regardless of
+  // which page the shift was actually selected on.
   useEffect(() => {
-    setCurrentShiftIdState(profile?.current_shift_id ?? null);
-  }, [profile?.current_shift_id]);
+    if (!ready || !profile) return;
+    let cancelled = false;
+    void client
+      .from("users")
+      .select("current_shift_id")
+      .eq("id", profile.id)
+      .single()
+      .then(({ data }) => {
+        if (!cancelled) setCurrentShiftIdState(data?.current_shift_id ?? null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, profile, ready]);
 
   const shifts: BranchShift[] = profile?.branch_id ? (shiftsByBranch[profile.branch_id] ?? []) : [];
   const shiftUIVisible = shifts.length >= 2;
