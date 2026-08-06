@@ -82,11 +82,26 @@ not through Claude Design for final implementation.
 ```
 id, email, password_hash, role (super_admin | owner | branch_manager),
 name, name_ar, restaurant_name, restaurant_name_ar, phone, avatar_url,
-is_active, created_at
+is_active, current_shift_id (→ branch_shifts, NULLABLE), created_at
 ```
 > `restaurant_name`/`restaurant_name_ar` (owner role only) added 2026-07-26
 > during Phase 1 auth build — the signup form collects a restaurant name
 > distinct from the owner's own name, and the schema had nowhere to put it.
+>
+> `current_shift_id` added 2026-08-05/06 for Work Shifts (comanager-logic
+> §9) — a branch manager's mutable, manually-selected "which shift am I
+> working right now" state. Deliberately not a `role`/`branch_id`-style
+> static field: it's expected to change mid-session from the manager's own
+> action on the Dashboard. **Write access is column-scoped, not just
+> RLS-scoped** — `authenticated` had a pre-existing blanket table-wide
+> `UPDATE` grant on `users` (Supabase default) with zero UPDATE RLS
+> policies at the time this was added, so a plain `for update using (id =
+> auth.uid())` policy alone would have let a manager rewrite their own
+> `role`/`branch_id`/`is_active` too. Fixed via `REVOKE UPDATE ON
+> public.users FROM authenticated; GRANT UPDATE (current_shift_id) ON
+> public.users TO authenticated;` alongside the RLS policy — the only
+> column a manager's own session can ever write on this table. Read
+> access uses ordinary RLS (no column restriction needed for SELECT here).
 
 ### branches
 ```
@@ -97,8 +112,8 @@ address, address_ar, city, phone, is_active, created_at
 ### tasks
 ```
 id, branch_id (→ branches, NULLABLE — null means global task for all branches),
-created_by (→ users), title, title_ar, description, description_ar,
-category, frequency (daily | weekly | monthly),
+shift_id (→ branch_shifts, NULLABLE), created_by (→ users), title, title_ar,
+description, description_ar, category, frequency (daily | weekly | monthly),
 is_active (boolean, must be true on insert), created_at
 ```
 > **A task is a checklist, not a flat unit** — founder decision, 2026-07-29,
@@ -109,6 +124,15 @@ is_active (boolean, must be true on insert), created_at
 > founder chose **per-item** requirements over the simpler once-per-task
 > option. Every task should have at least one active `task_item` (enforced
 > app-side, not a DB constraint).
+>
+> `shift_id` added 2026-08-05 for Work Shifts (comanager-logic §9) — NULL
+> means "applies to every shift the branch has" (mirrors the existing
+> `branch_id: null` = "all branches" convention, one dimension deeper).
+> Non-null requires `branch_id` to also be non-null — a shift-scoped task
+> only makes sense for one specific branch, enforced by a CHECK constraint
+> (`tasks_shift_requires_branch`) plus a trigger
+> (`enforce_shift_branch_match`) that rejects a `shift_id` belonging to a
+> different branch than the row's own `branch_id`.
 
 ### task_items
 ```
@@ -124,6 +148,8 @@ value_min, value_max, is_active (boolean), created_at
 ### task_submissions
 ```
 id, task_id (→ tasks), submitted_by (→ users), branch_id (→ branches),
+shift_id (→ branch_shifts, NULLABLE),
+shift_key (uuid, GENERATED ALWAYS AS coalesce(shift_id, '00000000-...') STORED),
 status (completed | pending | missed), submitted_at, due_date
 ```
 > Column is `submitted_at` (not submission_date — that column does not
@@ -133,6 +159,20 @@ status (completed | pending | missed), submitted_at, due_date
 > child `task_item_submissions` row for that cycle is `completed`. No
 > longer carries `photo_url`/`note`/`value_entered` directly (moved to the
 > item-level table below, since requirements are per-item now).
+>
+> `shift_id`/`shift_key` added 2026-08-05 for Work Shifts. The row is now
+> one per (task, branch, due_date, shift) once a task is shift-scoped or
+> its branch has shifts at all — a both-shifts task gets one independent
+> submission row per active shift (comanager-logic §9's expansion rule:
+> 0 shifts → one `shift_id: null` row; a shift-scoped task → one row for
+> that shift; an unscoped task on a branch with shifts → one row per
+> active shift). `shift_key` exists purely so the uniqueness constraint
+> and the edge function's `.upsert({ onConflict })` both work correctly —
+> Postgres unique constraints treat NULL as never-equal-to-NULL, so a
+> plain `unique(task_id, branch_id, due_date, shift_id)` would silently
+> allow duplicate rows whenever `shift_id` is null (BUG#040). The real
+> unique constraint (`task_submissions_unique_slot`) is on `(task_id,
+> branch_id, due_date, shift_key)`.
 
 ### task_item_submissions
 ```
@@ -147,7 +187,8 @@ submitted_at, submitted_by (→ users)
 
 ### food_safety_standards
 ```
-id, branch_id (→ branches, NULLABLE for global standards), created_by (→ users),
+id, branch_id (→ branches, NULLABLE for global standards),
+shift_id (→ branch_shifts, NULLABLE), created_by (→ users),
 title, title_ar, description, description_ar, check_frequency,
 temperature_min, temperature_max, requires_photo, requires_note,
 is_active (boolean, must be true on insert), created_at
@@ -158,11 +199,18 @@ is_active (boolean, must be true on insert), created_at
 > `requires_value` has no column here: a reading is always required for a
 > food-safety check (pass/fail is derived from it), so there's no
 > checkbox-only case the way there is for tasks.
+>
+> `shift_id` added 2026-08-05 for Work Shifts — identical semantics to
+> `tasks.shift_id` above (NULL = every shift the branch has; non-null
+> requires `branch_id` non-null too, same CHECK/trigger pattern via
+> `fs_standards_shift_requires_branch`/`enforce_shift_branch_match`).
 
 ### food_safety_submissions
 ```
 id, standard_id (→ food_safety_standards), submitted_by (→ users),
-branch_id (→ branches), result (pending | pass | fail | missed),
+branch_id (→ branches), shift_id (→ branch_shifts, NULLABLE),
+shift_key (uuid, GENERATED ALWAYS AS coalesce(shift_id, '00000000-...') STORED),
+result (pending | pass | fail | missed),
 actual_value, corrective_note, photo_url, due_date, submitted_at
 ```
 > Column is `result` (NOT status — that column does not exist).
@@ -172,6 +220,15 @@ actual_value, corrective_note, photo_url, due_date, submitted_at
 > tasks and food safety; this enum didn't support it before. Deliberately
 > a distinct value from `fail`: missed = never checked, fail = checked and
 > out of range — different events for the alert/acknowledge flow.
+>
+> `shift_id`/`shift_key` added 2026-08-05 — identical mechanism to
+> `task_submissions` above, same `shift_key` generated-column reason
+> (BUG#040: PostgREST's `.upsert({ onConflict })` can only target a real
+> named unique constraint on plain columns, not a `COALESCE(...)`
+> expression index — the generated `shift_key` column exists purely to
+> give the uniqueness check a real column to target). Real unique
+> constraint: `fs_submissions_unique_slot` on `(standard_id, branch_id,
+> due_date, shift_key)`.
 
 ### schedule_events
 ```
@@ -184,6 +241,50 @@ end_time, event_type, assigned_to (→ users), created_at
 > didn't was copied from the old OpsPilot bug log (comanager-bug-log
 > BUG #006) without re-checking against Co Manager's actual schema.sql,
 > which already had it. See that bug log entry for the correction.
+
+### branch_shifts
+```
+id, branch_id (→ branches), name, name_ar, start_time (time),
+end_time (time), is_active, created_at
+```
+> Added 2026-08-05 for Work Shifts (comanager-logic §9). Owner-configured
+> per branch, from Branches → Edit branch — not a separate sidebar page.
+> "Deactivate" (not delete) is reversible and, per a dedicated trigger
+> (`reset_current_shift_on_deactivate`), nulls any manager's
+> `users.current_shift_id` that was pointing at a shift the moment it's
+> deactivated — prevents an orphaned reference to a now-inactive shift.
+> **A branch with 0 or 1 active shift is treated as having no shift
+> feature at all for UI purposes** — the switcher, handover card, and
+> shift-scoped filtering on the branch manager side only ever appear once
+> a branch has 2+ active shifts (`lib/hooks/useBranchShifts.ts`'s
+> `hasShiftUI`). This keeps every existing branch's behavior completely
+> unchanged unless the owner deliberately opts in by adding a second
+> shift.
+
+### shift_handovers
+```
+id, branch_id (→ branches), shift_id (→ branch_shifts),
+handover_date (date), note, left_by (→ users, NULLABLE),
+left_by_name (text, NULLABLE), updated_at,
+unique (branch_id, shift_id, handover_date)
+```
+> Added 2026-08-05 for Work Shifts. One note per (branch, shift, day) —
+> upsertable, not a message thread (comanager-logic §9: "don't
+> over-engineer into a full messaging thread"). A manager can only
+> insert/update rows for their own branch (RLS scoped to
+> `my_branch_id()`); owners get read-only visibility across their
+> branches; no delete policy exists for either role.
+>
+> `left_by_name` added 2026-08-06 (BUG#042) as a **denormalized snapshot**
+> of the writer's own name, written at the same time as `left_by` —
+> deliberately not resolved via a `users` lookup at read time. RLS has no
+> policy letting a branch manager read a co-worker's `users` row at all,
+> and per BUG#019 (RLS is row-level, not column-level), a policy scoped
+> "just enough" to expose a name would still expose that row's
+> email/phone/role over raw REST. Denormalizing onto a row the writer
+> already legitimately owns avoids widening `users` access at all — see
+> BUG#042 for the full reasoning and the live raw-REST proof that a
+> manager still cannot read a co-worker's `users` row.
 
 ### notifications
 ```
@@ -265,6 +366,12 @@ skill for anything touching how the app actually behaves. Summary only below:**
    comanager-conventions for the query pattern, comanager-logic for generation).
 8. Data isolation between restaurants is enforced via Postgres RLS, not just
    app-level filtering — see comanager-logic Section 3.
+9. Work Shifts (added 2026-08-05/06) let an owner optionally define named
+   shifts per branch; tasks/standards can be shift-scoped or left
+   unscoped (applies to every shift); a branch manager manually declares
+   which shift they're on. **A branch with fewer than 2 active shifts
+   behaves exactly as it did before this feature existed** — see
+   comanager-logic Section 9 for the full expansion/UI-visibility rules.
 
 ---
 

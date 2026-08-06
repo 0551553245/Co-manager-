@@ -36,6 +36,15 @@ description: Screen-by-screen inventory of the actual Co Manager UI screens (fro
 ### Branches (`/owner/branches`)
 - Grid of branch cards: name, address, a completion % badge (colored by the same gradient threshold as Reports), **"Managers: X/2"** (directly surfaces the cap from comanager-logic §2), and a compact dot-stat row: `8✓ · 2• · 0✗` (completed / pending / missed counts, inline).
 - "+ Add branch" top right.
+- **Shift configuration lives in Edit branch, not a new sidebar page**
+  (comanager-logic §9, built 2026-08-05) — `BranchShiftsSection` renders
+  inside `BranchModal` only in edit mode (`branchId`/`client` props
+  present), positioned right before Cancel/Save. Shows the branch's
+  shifts as a list (name, start–end time) with a reversible
+  Deactivate/Reactivate per row, plus an inline add-shift form (name +
+  start/end time, validated end > start) — no separate modal, matching
+  the same low-friction-creation spirit as comanager-logic §7 even though
+  shift config itself was never part of that rule.
 
 ### Managers (`/owner/managers`)
 - Simple table: Name, Branch, Email, Status.
@@ -49,6 +58,17 @@ description: Screen-by-screen inventory of the actual Co Manager UI screens (fro
 - A **7-segment history strip** under each card — a compact row of small marks representing recent cycles' completion (color-coded: filled dark = completed, amber = partial/pending, gray = empty/not yet due). Still one strip per task (per `task_submissions` row, the rollup), not per item.
 - "Duplicate" button per card (clone a task's settings AND its items as a starting point for a new one).
 - "+ New task" opens the low-friction creation modal (comanager-logic §7) — items are added within that same modal (title + per-item requirement toggles, reorderable), not a separate screen.
+- **Shift dropdown (added 2026-08-05, comanager-logic §9):** a "Shift"
+  `<select>` renders in the create/edit/duplicate modal right after the
+  Scope (branch) select — but **only when the modal's currently-selected
+  branch has 2+ active shifts** (looked up live from
+  `useActiveBranchShifts`, not a static list). Options are "All shifts" +
+  each active shift by name. Switching Scope back to "All branches" (or
+  to a branch with fewer than 2 shifts) clears any selected shift and
+  hides the dropdown again — a task can never end up shift-scoped without
+  also being branch-scoped (matches the DB-level
+  `tasks_shift_requires_branch` CHECK, enforced client-side too so the
+  error is immediate, not a failed save).
 
 **Submission detail accordion (added 2026-08-04, founder-confirmed):**
 clicking anywhere on a task card (other than its Edit/Duplicate/Deactivate
@@ -83,6 +103,9 @@ expanded card, not prefetched for every card on the page.
 - Alert banner when there are unresolved failures: "N unresolved food-safety failures", showing branch/standard/submitter/time for the most recent, a "View all" link, and an **Acknowledge** button — matches comanager-logic's fail-state flow exactly.
 - "Standards" section: cards per standard (name, range, Duplicate button).
 - "Recent readings" — a table, branches as rows, standards as columns, Pass/Fail cells color-coded (green/red). Toggle between "Log" (chronological) and "By branch" (grid, as shown) views.
+- **Shift dropdown** — same pattern, same placement (right after Scope),
+  same branch-scoped-only visibility rule as the Tasks modal above (see
+  that entry for the full behavior — identical component, reused as-is).
 
 ### Schedule (`/owner/schedule`)
 - Full calendar (Month/Week/Day toggle), color-coded event blocks by type (Training=green, Inspection=amber, Audit=red, Meeting=neutral).
@@ -245,20 +268,49 @@ the table rather than one chart each.
 
 ### Dashboard (`/branch-manager/dashboard`)
 - Personalized greeting: "Good shift, {first name}" — use the manager's actual first name from their profile.
-- **Ignore the "shift progress"/"shift end time" card** — confirmed mockup filler, not a real feature. Replace with something meaningful (e.g. overall today's completion) when actually building this screen.
+- **The original mockup's fixed "Shift ends: 22:00" + progress-ring card was never built** — replaced with "Today's completion" (overall completion %, see resolved conflicts above). That resolution still stands as-is for the *card itself*.
 - "Today's tasks" — list with per-task progress (X/Y items).
 - "Food safety due" — ring chart + Pass/Fail/Pending counts with colored dots.
 - "Next scheduled event" card.
+- **Shift panel (`ShiftPanel`, added 2026-08-05/06, comanager-logic §9)** —
+  a real, separate feature from the rejected mockup card above, rendered
+  only when the manager's own branch has 2+ active shifts. Sits directly
+  below "Today's completion": a row of shift-name pill buttons (selected
+  one highlighted green) plus, once a shift is picked, a combined
+  handover card underneath — an amber-tinted "HANDOVER" box showing any
+  note left for a *different* shift today (never the currently-selected
+  shift's own note, to avoid showing a manager their own still-open
+  draft as if it were "handed to them"), attributed by name via
+  `shift_handovers.left_by_name` (BUG#042 — denormalized at write time,
+  not looked up against `users`, to avoid widening RLS read access to
+  co-workers' profiles), followed by an editable textarea + "Save note"
+  for the manager's own currently-selected shift. Switching shifts
+  re-fetches that shift's own draft (if one exists today) into the
+  textarea — never leaks the previous shift's in-progress text.
+- **On a branch with 0 or 1 active shift, none of this renders** — no
+  switcher, no handover card, page looks exactly as it did before Work
+  Shifts existed (verified live, comanager-logic §9's "treat 1 shift as
+  0 for UI purposes" rule).
 
 ### Tasks (`/branch-manager/tasks`)
 - Accordion-style cards, one per task (per `task_submissions` row), expandable to show its individual checklist items (its `task_items`, each with its own `task_item_submissions` row for this cycle) — resolved 2026-07-29, this is a real per-item list now, not a flat single-submission task.
 - **Color-coded by urgency, not just pass/fail**: a task at 0% (no items done) shows in red/pink — this is a different semantic use of red than "failed" elsewhere in the app (which is reserved for food-safety fails). Treat this as "needs attention" urgency coloring specific to the manager's own task list, separate from the pass/fail red used in Food Safety.
 - Each expanded item shows a checkbox plus, conditionally, an "Add photo" button (if that item's own `requires_photo`) or an "Add a note..." input (if `requires_note`) — the requirement flags are per-item now, so different items on the same task can show different controls.
 - The parent task card's own status only becomes "done" once every item underneath it is submitted (client-side rollup after each item submission — see comanager-logic §4).
+- **Shift filtering (added 2026-08-05, comanager-logic §9):** once the
+  branch has 2+ active shifts and the manager has picked one (via the
+  Dashboard's switcher — there's no second switcher on this page), the
+  list only shows this cycle's `task_submissions` rows where
+  `shift_id` matches the selected shift OR is `null` (shift-agnostic
+  tasks always show regardless of which shift is selected). On a branch
+  with fewer than 2 shifts, every row shows, unfiltered — identical to
+  pre-feature behavior.
 
 ### Food Safety (`/branch-manager/food-safety`)
 - One card per standard: name, range, a reading input, Submit button.
 - Subtitle: "Enter a reading — pass/fail is calculated automatically" — reinforces that pass/fail is never manually chosen, always derived from the value against the standard's range.
+- **Shift filtering** — identical rule and mechanism to Tasks above,
+  applied to `food_safety_submissions` instead.
 
 ### Schedule (`/branch-manager/schedule`)
 - Simple list (not a calendar) — "Events set by your owner for this branch," read-only, day/date + type badge + title + time range.
@@ -273,6 +325,22 @@ the table rather than one chart each.
 - **Avatar**: 2-letter initials in a colored circle (top right of every authenticated screen) — same component across both panels.
 - **Alert banner**: red-tinted, left-icon, title + detail line + action button — used for the food-safety fail alert, likely reusable for other "needs attention" banners later.
 - **Submission detail accordion**: click-to-expand-in-place card → today's completed-item evidence rows, grouped by branch only when the task is scoped to "all branches" — used on Owner Tasks cards; likely reusable on Owner Food Safety's standard cards later if the founder wants the same drill-down there.
+- **Shift dropdown** (owner side, added 2026-08-05): a `<select>` that
+  only renders once the modal's selected branch has 2+ active shifts —
+  same component, reused as-is on both the Tasks and Food Safety
+  create/edit/duplicate modals (`shiftsByBranch` prop, sourced from the
+  shared `useActiveBranchShifts` hook). Not yet used anywhere else, but
+  the same "only show once the target has 2+ shifts" visibility rule
+  should be the default for any future shift-aware owner control, rather
+  than each screen re-deriving its own threshold.
+- **Shift switcher + handover card** (branch manager side, added
+  2026-08-05/06, `ShiftPanel`): pill-button switcher + combined
+  handover-note card, gated behind the same "2+ active shifts" rule as
+  above but from the manager's own branch rather than a form field. Only
+  built on the Dashboard so far (comanager-logic §9 places the switcher
+  there specifically); Tasks/Food Safety read the *selection* made on
+  Dashboard (via the shared `useManagerShift` hook) but don't render
+  their own copy of the switcher UI.
 - **Photo lightbox** (added 2026-08-04, founder-confirmed, shared component `components/PhotoLightbox.tsx`): every submitted-photo link across both panels opens in-app instead of a new tab — dark overlay (`bg-ink/80`) behind a large centered image (`max-h-[85vh]`, `rounded-xl` per the design system's 20px larger-modal radius), close via an X button (top-right, `rounded-xl bg-card`), clicking the overlay outside the image, or Escape. **Identical everywhere, photo only, no caption** — the item/date/submitter context already lives on the row the click came from, and duplicating it inside the modal was explicitly rejected in favor of keeping one simple component with zero per-panel variants. Replaces the plain `<a target="_blank">`/`<img>` links that used to be at:
   - Owner Tasks accordion (`SubmissionRow`'s 📷 icon)
   - Branch Manager Tasks' expanded completed-item view ("View photo")
