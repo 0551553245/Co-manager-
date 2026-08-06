@@ -11,6 +11,7 @@ interface HandoverRow {
   shift_id: string;
   note: string;
   left_by: string | null;
+  left_by_name: string | null;
 }
 
 // comanager-logic §9: the manual shift switcher lives on the manager's
@@ -23,6 +24,7 @@ export function ShiftPanel({
   client,
   branchId,
   managerId,
+  managerName,
   shifts,
   currentShiftId,
   selectShift,
@@ -30,32 +32,32 @@ export function ShiftPanel({
   client: SupabaseClient;
   branchId: string;
   managerId: string;
+  managerName: string;
   shifts: BranchShift[];
   currentShiftId: string | null;
   selectShift: (shiftId: string) => Promise<void>;
 }) {
   const [handovers, setHandovers] = useState<HandoverRow[]>([]);
-  const [managerNames, setManagerNames] = useState<Record<string, string>>({});
   const [noteDraft, setNoteDraft] = useState("");
   const [saving, setSaving] = useState(false);
 
   const today = riyadhDateString();
 
+  // Name attribution is a snapshot written by the same manager saving
+  // their own note (left_by_name, see the Stage-3-followup migration) —
+  // deliberately not a lookup against `users` for a co-worker's row.
+  // RLS has no policy letting a manager read another manager's `users`
+  // row at all, and per BUG#019 a policy scoped "just enough" to leak
+  // only a name is still a policy that leaks the whole row over raw
+  // REST (RLS is row-level, not column-level) — so this sidesteps that
+  // class of risk entirely rather than trying to scope around it.
   const load = useCallback(async () => {
-    const [{ data: rows }, { data: managers }] = await Promise.all([
-      client
-        .from("shift_handovers")
-        .select("id, shift_id, note, left_by")
-        .eq("branch_id", branchId)
-        .eq("handover_date", today),
-      client.from("users").select("id, name").eq("branch_id", branchId).eq("role", "branch_manager"),
-    ]);
+    const { data: rows } = await client
+      .from("shift_handovers")
+      .select("id, shift_id, note, left_by, left_by_name")
+      .eq("branch_id", branchId)
+      .eq("handover_date", today);
     setHandovers(rows ?? []);
-    const names: Record<string, string> = {};
-    (managers ?? []).forEach((m) => {
-      names[m.id] = m.name;
-    });
-    setManagerNames(names);
   }, [client, branchId, today]);
 
   useEffect(() => {
@@ -81,6 +83,7 @@ export function ShiftPanel({
         handover_date: today,
         note: noteDraft,
         left_by: managerId,
+        left_by_name: managerName,
         updated_at: new Date().toISOString(),
       },
       { onConflict: "branch_id,shift_id,handover_date" },
@@ -119,7 +122,7 @@ export function ShiftPanel({
               {otherNotes.map((n) => (
                 <p key={n.id} className="mt-1 text-sm">
                   <strong>{shifts.find((s) => s.id === n.shift_id)?.name ?? "Other shift"}</strong>
-                  {n.left_by && managerNames[n.left_by] ? ` (${managerNames[n.left_by]})` : ""}: {n.note}
+                  {n.left_by_name ? ` (${n.left_by_name})` : ""}: {n.note}
                 </p>
               ))}
             </div>

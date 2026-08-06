@@ -144,6 +144,7 @@ export default function BranchManagerDashboardPage() {
               client={client}
               branchId={profile.branch_id}
               managerId={profile.id}
+              managerName={profile.name}
               shifts={shifts}
               currentShiftId={currentShiftId}
               selectShift={selectShift}
