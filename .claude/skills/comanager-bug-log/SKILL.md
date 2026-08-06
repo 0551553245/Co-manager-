@@ -2263,6 +2263,83 @@ export function useManagerShift(client, profile, ready) {
 
 ---
 
+### BUG #042 — Handover Note Name Attribution Had No Read Path That Wasn't Either Broken or a Cross-Tenant RLS Risk
+**Severity:** MEDIUM (feature gap, not a live leak — the attempted fix path never actually reached production)
+**Area/File:** `app/branch-manager/(authenticated)/dashboard/ShiftPanel.tsx`, `shift_handovers` (Work Shifts, comanager-logic §9)
+
+**Found during:** Stage 3 live verification (2026-08-06) — noted as a
+non-blocking cosmetic gap and flagged to the founder rather than silently
+left unexplained: `ShiftPanel` tried to resolve a handover note's author
+by querying `public.users` for every branch manager on the branch, but
+that query always silently returned zero rows (no RLS policy lets a
+manager read a co-worker's `users` row at all), so the note rendered with
+no name.
+
+**The problem:** the tempting "just add a policy" fix is exactly the
+shape BUG#019 already warned about — RLS is enforced per ROW, not per
+column. A policy like `manager reads co-worker users rows on own branch`
+would make the whole matched row selectable over raw REST, not just the
+`name` the UI happens to display — a raw `select=id,name,email,phone` from
+one manager's own session would then return a co-worker's email and phone
+too, even though the UI only ever asked for `name`. Column-level `GRANT`
+(the technique used for the Stage 3 `current_shift_id` write path) doesn't
+fix this for `SELECT` the way it does for `UPDATE`, either — grants are
+table-wide per role, and `authenticated` already needs broader `SELECT`
+access to `users` for a manager's own profile fetch, an owner's manager
+list, etc.; narrowing that grant to `(id, name)` would break those other
+legitimate reads.
+
+**WRONG:**
+```ts
+// Tries to resolve OTHER managers' names by reading their users rows —
+// either silently returns nothing (no policy exists) or, if "fixed" by
+// adding a policy scoped to the same branch, exposes every other column
+// on that row too, since RLS can't restrict which columns a matched row
+// reveals.
+const { data: managers } = await client
+  .from("users")
+  .select("id, name")
+  .eq("branch_id", branchId)
+  .eq("role", "branch_manager");
+```
+
+**CORRECT:**
+```sql
+-- Denormalize the name onto the row the writer already has full
+-- access to (their own shift_handovers upsert) instead of granting
+-- any new read path into `users` at all.
+alter table public.shift_handovers add column left_by_name text;
+```
+```ts
+// ShiftPanel.tsx — written by the same manager saving their own note,
+// using their own already-known name (never someone else's row):
+await client.from("shift_handovers").upsert(
+  { ..., left_by: managerId, left_by_name: managerName, ... },
+  { onConflict: "branch_id,shift_id,handover_date" },
+);
+// Read side: use the snapshot column directly, no users query at all.
+const { data: rows } = await client
+  .from("shift_handovers")
+  .select("id, shift_id, note, left_by, left_by_name")
+  .eq("branch_id", branchId)
+  .eq("handover_date", today);
+```
+
+**Rule:** When a UI needs to display one narrow fact about another
+tenant's user (a name, in this case) and no RLS policy currently exposes
+that user's row, check whether the fact can be **denormalized onto a row
+the requester already legitimately writes** before adding any new SELECT
+policy on `users` — RLS's row-level (not column-level) granularity means
+"just let them read the name" is never actually narrow once it's a real
+policy. Verified live 2026-08-06: (1) a co-worker's handover note now
+shows their real name; (2) a raw REST `GET .../users?select=id,name,email,phone&name=eq.<co-worker>`
+using the reading manager's own bearer token returns `[]` — confirmed
+against the same manager's own row returning full data, proving the empty
+result is RLS correctly blocking the *other* user's row, not a broken
+query.
+
+---
+
 ## ➕ HOW TO ADD A NEW BUG
 
 When you fix a new bug, add it at the bottom of the relevant severity
