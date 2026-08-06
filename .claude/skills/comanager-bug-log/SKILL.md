@@ -2340,6 +2340,152 @@ query.
 
 ---
 
+### BUG #043 — Deactivating a Shift Orphaned Already-Generated Submission Rows That Referenced It
+**Severity:** MEDIUM (data becomes invisible, not corrupted — the row and its evidence are untouched, just unreachable in the manager UI for the rest of that day)
+**Area/File:** `reset_current_shift_on_deactivate()` trigger (Work Shifts, comanager-logic §9)
+
+**Found during:** full-app regression, 2026-08-06 — specifically the
+"set up shifts fresh on a currently-0-shift branch" scenario, testing a
+branch that (unnoticed at first) already had exactly 1 leftover active
+shift from earlier build-verification testing. An unscoped task created
+while that branch had exactly 1 active shift expanded, per comanager-logic
+§9's own rule ("unscoped + has shifts -> all active shift ids", no
+special-case for exactly 1), to a `task_submissions` row with
+`shift_id` = that one shift's id — not `null`. Deactivating that shift
+and adding two fresh ones (reaching the real 2-shift threshold) flipped
+`shiftUIVisible` to true for the branch. The manager-side filter,
+`shift_id === currentShiftId || shift_id === null`, then matched
+*neither* arm for either of the two new shifts — the row vanished from
+"Today's tasks" permanently for that day, with its real data completely
+intact and simply unreachable.
+
+**The problem:** `reset_current_shift_on_deactivate()` (added in the
+original Stage 1 migration to fix the *user*-level orphaned-reference case
+— a manager's `current_shift_id` pointing at a shift that just got
+deactivated) only ever cleaned up `users.current_shift_id`. Nothing
+cleaned up the equivalent dangling reference on already-generated
+`task_submissions`/`food_safety_submissions` rows for the *same* event.
+
+**WRONG:**
+```sql
+create or replace function public.reset_current_shift_on_deactivate()
+returns trigger language plpgsql security definer as $$
+begin
+  if new.is_active = false and old.is_active = true then
+    update public.users set current_shift_id = null where current_shift_id = new.id;
+    -- nothing here cleans up task_submissions/food_safety_submissions
+    -- rows whose shift_id still points at the shift just deactivated
+  end if;
+  return new;
+end;
+$$;
+```
+
+**CORRECT:**
+```sql
+create or replace function public.reset_current_shift_on_deactivate()
+returns trigger language plpgsql security definer as $$
+begin
+  if new.is_active = false and old.is_active = true then
+    update public.users set current_shift_id = null where current_shift_id = new.id;
+
+    -- Fall back to "applies to every shift" rather than leaving a
+    -- reference to a shift that no longer exists in the active set.
+    -- Scoped to status/result = 'pending' only: a completed or missed
+    -- row is a historical record of which shift it actually happened
+    -- under and must not be rewritten (same "never rewrite submission
+    -- history" principle as task/standard edits, comanager-logic §7).
+    update public.task_submissions
+      set shift_id = null
+      where shift_id = new.id and status = 'pending';
+
+    update public.food_safety_submissions
+      set shift_id = null
+      where shift_id = new.id and result = 'pending';
+  end if;
+  return new;
+end;
+$$;
+```
+
+**Rule:** Any trigger written to clean up ONE dangling reference to a
+row that's about to become invalid (here: a deactivated shift) should be
+audited for every OTHER table that can hold the same kind of reference —
+`reset_current_shift_on_deactivate` fixed the `users` case but the exact
+same "this foreign key can point at something that just stopped being
+valid" problem existed one hop over, on the submission tables, and wasn't
+caught until a regression pass exercised the specific sequence (create
+against N shifts, then deactivate one, then reach the 2+ visibility
+threshold) that makes it observable. When a "the referenced row is going
+away" cleanup trigger is added, grep the schema for every other column
+with the same foreign key target before considering it done. Verified
+live 2026-08-06: reproduced the orphaning end-to-end (task scoped to a
+shift that's about to be deactivated -> deactivate -> row's `shift_id`
+still pointed at the dead shift, confirmed via direct query), applied the
+fix, then reproduced the exact same sequence again and confirmed the
+row's `shift_id` was correctly nulled by the trigger instead.
+
+---
+
+### BUG #044 — Branch-Manager Tasks Item-Count Badge Used the Active Item List, Not This Cycle's Actual Submission Rows
+**Severity:** LOW (cosmetic — never blocks completion, since the rollup check (BUG#026) already uses the correct source; only the displayed fraction during the pending window is wrong)
+**Area/File:** `app/branch-manager/(authenticated)/tasks/page.tsx`
+
+**Found during:** full-app regression, 2026-08-06, live-testing a task
+edited to add a 3rd checklist item *after* that day's slot had already
+generated (comanager-logic §7: edits apply going forward only, so
+today's `task_submissions` row correctly kept only its original 2 items'
+worth of `task_item_submissions` rows). The card's badge read "0/3
+ITEMS" and, after completing both of the two items that actually had
+submission rows, would have stayed stuck at "2/3" forever that day —
+even though nothing more was actually completable.
+
+**The problem:** this is BUG#026's exact lesson (a cycle's real state
+lives in the actual `task_item_submissions` rows, not in whatever
+`task_items` happen to be active right now), missed in a second location
+— BUG#026 fixed the *rollup* check (`checkAndRollupParent`, which already
+queries submission rows directly and was unaffected here), but the
+*badge/count display* a few lines away still derived its denominator from
+`items.filter(i => i.task_id === task.id)` (the live, currently-active
+item list) rather than from this specific submission's own item rows.
+
+**WRONG:**
+```ts
+const taskItems = items.filter((i) => i.task_id === task.id);
+const doneCount = taskItems.filter(
+  (i) => itemSubs.find((s) => s.task_submission_id === sub.id && s.item_id === i.id)?.status === "completed",
+).length;
+// ...
+{sub.status === "completed" ? "completed" : `${doneCount}/${taskItems.length} items`}
+```
+
+**CORRECT:**
+```ts
+const taskItems = items.filter((i) => i.task_id === task.id);
+const cycleItems = taskItems.filter((i) =>
+  itemSubs.some((s) => s.task_submission_id === sub.id && s.item_id === i.id),
+);
+const doneCount = cycleItems.filter(
+  (i) => itemSubs.find((s) => s.task_submission_id === sub.id && s.item_id === i.id)?.status === "completed",
+).length;
+// ...
+{sub.status === "completed" ? "completed" : `${doneCount}/${cycleItems.length} items`}
+// ...and the expanded item list itself now maps over cycleItems, not
+// taskItems, so an item with no submission row this cycle is naturally
+// absent rather than rendered-then-null-filtered.
+```
+
+**Rule:** A fix for "denominator must come from actual submission rows,
+not the live definition list" (BUG#026) doesn't automatically cover every
+place in the same file that independently re-derives a similar count —
+grep the rest of the component for other uses of the raw definition list
+(`task_items`/`food_safety_standards`) as a denominator before considering
+the lesson fully applied. Verified live 2026-08-06: reproduced the stale
+"0/3" badge, applied the fix, redeployed, and confirmed the same card now
+reads against its actual 2-item cycle.
+
+---
+
 ## ➕ HOW TO ADD A NEW BUG
 
 When you fix a new bug, add it at the bottom of the relevant severity

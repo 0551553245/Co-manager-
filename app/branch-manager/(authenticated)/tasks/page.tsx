@@ -158,8 +158,19 @@ export default function BranchManagerTasksPage() {
           {relevantSubmissions.map((sub) => {
             const task = tasks.find((t) => t.id === sub.task_id);
             if (!task) return null;
+            // Denominator must be this cycle's actual task_item_submissions
+            // rows, not the currently-active task_items list (BUG#026's
+            // exact lesson, missed here) — an item added via edit after
+            // today's slot was already generated has no submission row for
+            // today (comanager-logic §7: edits apply going forward only),
+            // so counting it in the denominator makes the badge show e.g.
+            // "2/3" forever even once every actually-completable item is
+            // done.
             const taskItems = items.filter((i) => i.task_id === task.id);
-            const doneCount = taskItems.filter(
+            const cycleItems = taskItems.filter((i) =>
+              itemSubs.some((s) => s.task_submission_id === sub.id && s.item_id === i.id),
+            );
+            const doneCount = cycleItems.filter(
               (i) => itemSubs.find((s) => s.task_submission_id === sub.id && s.item_id === i.id)?.status === "completed",
             ).length;
             // Urgency coloring, separate semantic from food-safety fail red
@@ -175,13 +186,13 @@ export default function BranchManagerTasksPage() {
                 >
                   <span className="font-display text-lg">{task.title}</span>
                   <span className="rounded-pill bg-ink/10 px-2 py-1 font-mono text-xs uppercase">
-                    {sub.status === "completed" ? "completed" : `${doneCount}/${taskItems.length} items`}
+                    {sub.status === "completed" ? "completed" : `${doneCount}/${cycleItems.length} items`}
                   </span>
                 </button>
 
                 {expanded === sub.id && (
                   <div className="mt-3 flex flex-col gap-3">
-                    {taskItems.map((item) => {
+                    {cycleItems.map((item) => {
                       const itemSub = itemSubs.find(
                         (s) => s.task_submission_id === sub.id && s.item_id === item.id,
                       );
